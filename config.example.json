@@ -1,0 +1,8 @@
+{
+  "username": "填写学号",
+  "targets": [],
+  "poll_interval_minutes": 60,
+  "rate_limit_per_minute": 30,
+  "base_url": "https://wxxyshall.usts.edu.cn",
+  "chromium_path": "可选:自动探测系统 Chrome/Edge 失败时用此路径(本地登录)"
+}

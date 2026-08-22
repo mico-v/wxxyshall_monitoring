@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>离线 · 宿舍电费监控</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    color-scheme: light;
+    --page:        #f9f9f7;
+    --surface:     #fcfcfb;
+    --ink-1:       #0b0b0b;
+    --ink-2:       #52514e;
+    --ink-3:       #898781;
+    --series-1:    #2a78d6;
+    --border:      rgba(11, 11, 11, 0.10);
+    --shadow:      0 1px 2px rgba(11,11,11,0.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page:        #0d0d0d;
+      --surface:     #1a1a19;
+      --ink-1:       #ffffff;
+      --ink-2:       #c3c2b7;
+      --ink-3:       #898781;
+      --series-1:    #3987e5;
+      --border:      rgba(255, 255, 255, 0.10);
+      --shadow:      0 1px 2px rgba(0,0,0,0.3);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh;
+    display: grid; place-items: center; padding: 24px;
+    background: var(--page); color: var(--ink-1);
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC",
+                 "Microsoft YaHei", sans-serif;
+    line-height: 1.5;
+  }
+  .box {
+    text-align: center; max-width: 420px; width: 100%;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; padding: 48px 36px; box-shadow: var(--shadow);
+  }
+  .icon { font-size: 48px; margin-bottom: 16px; }
+  h1 { font-size: 18px; font-weight: 650; margin: 0 0 8px; }
+  p { color: var(--ink-2); font-size: 13px; margin: 0 0 26px; }
+  a.home {
+    display: inline-block; font: inherit; font-size: 13px; font-weight: 600;
+    color: #fff; background: var(--series-1); border-radius: 8px;
+    padding: 8px 20px; text-decoration: none;
+  }
+  a.home:hover { opacity: 0.9; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <div class="icon">📡</div>
+    <h1>网络连接已断开</h1>
+    <p>当前无法连接到服务器。请检查网络连接，稍后重试。<br>离线期间显示的是上次缓存的电费数据。</p>
+    <a class="home" href="/">← 重试连接</a>
+  </div>
+</body>
+</html>

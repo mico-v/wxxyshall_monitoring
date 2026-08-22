@@ -1,0 +1,33 @@
+# 敏感文件 — 切勿提交
+config.json
+token.json
+storage_state_live.json
+electricity.db*
+
+# Docker 数据卷
+data/
+
+# 归档/分析缓存
+_archive/
+
+# Go 编译产物
+/monitor
+/webapp
+/report
+/discover
+/query
+/push_token
+/token_status
+bin/
+
+# 日志
+*.log
+nohup.out
+
+# 编辑器
+.vscode/
+.idea/
+
+# Claude Code 会话数据
+.claude/
+CLAUDE.md
