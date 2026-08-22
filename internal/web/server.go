@@ -543,7 +543,7 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 	var err error
 
 	switch {
-	case r.URL.Path == "/api/campases":
+	case r.URL.Path == "/api/campuses":
 		opts, err = client.ListCampuses(feeitemID)
 	case r.URL.Path == "/api/buildings":
 		campus := q.Get("campus")
