@@ -1,9 +1,11 @@
 package web
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
-	"log"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,16 +30,16 @@ const (
 
 // Server 是 HTTP 服务器的主结构体。
 type Server struct {
-	cfg     *config.Config
-	tok     *config.Token
+	cfg      *config.Config
+	tok      *config.Token
 	database *db.DB
-	limiter *rate.Limiter
-	hub     *SSEHub
-	jobMgr  *JobManager
-	mu      sync.RWMutex
-	cfgPath string
-	tokPath string
-	dbPath  string
+	limiter  *rate.Limiter
+	hub      *SSEHub
+	jobMgr   *JobManager
+	mu       sync.RWMutex
+	cfgPath  string
+	tokPath  string
+	dbPath   string
 	adminKey string
 	rootDir  string
 }
@@ -61,7 +63,7 @@ func NewServer(cfgPath, tokPath, dbPath, adminKey, rootDir string) (*Server, err
 
 	// 回填旧数据
 	if err := database.BackfillRoomIDs(cfg); err != nil {
-		log.Printf("回填宿舍 ID 失败: %v", err)
+		slog.Warn("回填宿舍 ID 失败", "err", err)
 	}
 
 	hub := NewSSEHub()
@@ -100,6 +102,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/collect", s.rateLimit(s.handleCollect))
 	mux.HandleFunc("POST /api/collect-all", s.handleCollectAll)
 	mux.HandleFunc("GET /api/collect-all/status", s.handleCollectStatus)
+	mux.HandleFunc("POST /api/collect-all/cancel", s.handleCollectCancel)
 	mux.HandleFunc("GET /api/campuses", s.rateLimit(s.handleDiscover))
 	mux.HandleFunc("GET /api/buildings", s.rateLimit(s.handleDiscover))
 	mux.HandleFunc("GET /api/rooms", s.rateLimit(s.handleDiscover))
@@ -113,7 +116,7 @@ func (s *Server) Handler() http.Handler {
 	// 404 兜底
 	mux.HandleFunc("/", s.handle404)
 
-	return mux
+	return gzipHandler(mux)
 }
 
 // ---- 前端页面 ----
@@ -348,7 +351,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	if replaced {
 		action = "更新"
 	}
-	log.Printf("设置宿舍: %s %s/%s/%s (%s)", action, t.Campus, t.Building, t.Room, t.Label)
+	slog.Info("设置宿舍", "action", action, "campus", t.Campus, "building", t.Building, "room", t.Room, "label", t.Label)
 
 	s.handleGetConfig(w, r)
 }
@@ -359,7 +362,10 @@ func (s *Server) handleCollect(w http.ResponseWriter, r *http.Request) {
 		Building string `json:"building"`
 		Room     string `json:"room"`
 	}
-	json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体解析失败: " + err.Error()})
+		return
+	}
 
 	s.mu.RLock()
 	tok := s.tok
@@ -516,6 +522,15 @@ func (s *Server) handleCollectStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, job)
 }
 
+func (s *Server) handleCollectCancel(w http.ResponseWriter, r *http.Request) {
+	if s.jobMgr.Cancel() {
+		slog.Info("批量采集任务已取消")
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "state": "cancelled"})
+	} else {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "没有正在运行的采集任务"})
+	}
+}
+
 func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	tok := s.tok
@@ -602,14 +617,14 @@ func (s *Server) handlePushToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	days := tok.ExpiresIn / 86400
-	log.Printf("收到 token 推送（有效期约 %d 天）", days)
+	slog.Info("收到 token 推送", "expires_in_days", days)
 
 	s.mu.Lock()
 	s.tok = &tok
 	s.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":             true,
+		"ok":              true,
 		"expires_in_days": days,
 	})
 }
@@ -720,6 +735,14 @@ func (s *Server) runCollectJob(jobID string, cfg *config.Config, tok *config.Tok
 	clients := make(map[int]*charge.Client) // key: feeitemid
 
 	for i, t := range targets {
+		// 检查是否被取消
+		job := s.jobMgr.Get(jobID)
+		if job == nil || job.State == JobStateCancelled {
+			slog.Info("批量采集被取消")
+			s.jobMgr.FinishActive(jobID)
+			return
+		}
+
 		// 更新当前进度
 		target := t
 		s.jobMgr.Update(jobID, func(job *CollectJob) {
@@ -734,7 +757,7 @@ func (s *Server) runCollectJob(jobID string, cfg *config.Config, tok *config.Tok
 		// 限流
 		if limit > 0 && !s.limiter.Allow() {
 			skipped = len(targets) - i
-			log.Printf("批量采集限流，跳过剩余 %d 间", skipped)
+			slog.Warn("批量采集限流，跳过剩余房间", "skipped", skipped)
 			s.jobMgr.Update(jobID, func(job *CollectJob) {
 				job.Completed = i
 				job.Skipped = skipped
@@ -750,7 +773,7 @@ func (s *Server) runCollectJob(jobID string, cfg *config.Config, tok *config.Tok
 			client = charge.NewClient(base, tok.AccessToken)
 			if err := client.Establish(t.FeeItemID, t.AppID); err != nil {
 				if charge.IsAuthError(err) {
-					log.Printf("批量采集中止: 登录态失效")
+					slog.Warn("批量采集中止: 登录态失效")
 					s.jobMgr.Update(jobID, func(job *CollectJob) {
 						job.State = JobStateFailed
 						job.Error = err.Error()
@@ -761,7 +784,7 @@ func (s *Server) runCollectJob(jobID string, cfg *config.Config, tok *config.Tok
 					s.jobMgr.FinishActive(jobID)
 					return
 				}
-				log.Printf("批量采集 %s 建立会话失败: %v", t.DisplayLabel(), err)
+				slog.Warn("建立会话失败", "room", t.DisplayLabel(), "err", err)
 				failed++
 				results = append(results, JobResult{
 					RoomLabel:    t.DisplayLabel(),
@@ -780,7 +803,7 @@ func (s *Server) runCollectJob(jobID string, cfg *config.Config, tok *config.Tok
 		reading, err := client.QueryBalance(t.FeeItemID, t.Campus, t.Building, t.Room)
 		if err != nil {
 			if charge.IsAuthError(err) {
-				log.Printf("批量采集中止: 登录态失效")
+				slog.Warn("批量采集中止: 登录态失效")
 				s.jobMgr.Update(jobID, func(job *CollectJob) {
 					job.State = JobStateFailed
 					job.Error = err.Error()
@@ -791,7 +814,7 @@ func (s *Server) runCollectJob(jobID string, cfg *config.Config, tok *config.Tok
 				s.jobMgr.FinishActive(jobID)
 				return
 			}
-			log.Printf("批量采集 %s 失败: %v", t.DisplayLabel(), err)
+			slog.Warn("查询失败", "room", t.DisplayLabel(), "err", err)
 			failed++
 			results = append(results, JobResult{
 				RoomLabel:    t.DisplayLabel(),
@@ -815,7 +838,7 @@ func (s *Server) runCollectJob(jobID string, cfg *config.Config, tok *config.Tok
 			Raw:           reading.Raw,
 		}
 		if err := s.database.InsertReading(t, insertData); err != nil {
-			log.Printf("批量采集 %s 入库失败: %v", t.DisplayLabel(), err)
+			slog.Warn("入库失败", "room", t.DisplayLabel(), "err", err)
 			failed++
 			results = append(results, JobResult{
 				RoomLabel:    t.DisplayLabel(),
@@ -878,7 +901,7 @@ func (s *Server) runCollectJob(jobID string, cfg *config.Config, tok *config.Tok
 		}
 	}
 
-	log.Printf("批量采集完成: 成功 %d, 失败 %d, 跳过 %d", success, failed, skipped)
+	slog.Info("批量采集完成", "success", success, "failed", failed, "skipped", skipped)
 	s.jobMgr.Update(jobID, func(job *CollectJob) {
 		job.State = JobStateDone
 		job.Success = success
@@ -893,11 +916,41 @@ func (s *Server) runCollectJob(jobID string, cfg *config.Config, tok *config.Tok
 
 // ---- 工具函数 ----
 
+// gzipHandler 包装 HTTP 处理器，对支持 gzip 的客户端压缩响应。
+func gzipHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// SSE 不压缩
+		if strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Encoding", "gzip")
+		gw := gzip.NewWriter(w)
+		defer gw.Close()
+		next.ServeHTTP(gzipResponseWriter{ResponseWriter: w, Writer: gw}, r)
+	})
+}
+
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	Writer io.Writer
+}
+
+func (w gzipResponseWriter) Write(b []byte) (int, error) {
+	return w.Writer.Write(b)
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Error("JSON 序列化失败", "err", err)
+	}
 }
 
 func writeError(w http.ResponseWriter, err error) {

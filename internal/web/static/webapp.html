@@ -220,7 +220,7 @@ if ('serviceWorker' in navigator) {
   .card .card-bd { padding: 12px 18px 16px; min-width: 0; }
   #detail-card .card-bd { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
-  /* ---- 图表(ECharts) ---- */
+  /* ---- 图表(Canvas) ---- */
   .chart-holder { position: relative; }
   .chart-main { height: 320px; width: 100%; }
   .chart-holder.sub { height: 150px; width: 100%; }
@@ -268,7 +268,7 @@ if ('serviceWorker' in navigator) {
   }
   .mini-val { margin-left: auto; min-width: 0; flex: none; font-size: 12px; color: var(--ink-2);
               font-variant-numeric: tabular-nums; }
-  .chart-holder.sub svg { max-width: 100%; }
+  .chart-holder.sub { max-width: 100%; }
 
   /* ---- toast ---- */
   #toast {
@@ -329,6 +329,7 @@ if ('serviceWorker' in navigator) {
     </div>
     <div class="head-actions">
       <button class="btn" id="collect-btn" type="button">⚡ 立即采集</button>
+      <button class="theme-btn" id="collect-cancel-btn" type="button" hidden>取消采集</button>
       <button class="theme-btn" id="settings-btn" type="button">查询设置</button>
       <button class="theme-btn" id="theme-btn" type="button">深色</button>
     </div>
@@ -399,7 +400,6 @@ if ('serviceWorker' in navigator) {
   </div>
 </div>
 
-<script src="/static/echarts.min.js"></script>
 <script>
 "use strict";
 
@@ -716,195 +716,270 @@ function renderRoomKpis(holder, groups) {
   });
 }
 
-function isDark() {
-  const t = document.documentElement.getAttribute("data-theme");
-  return t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
-}
-function themeColors() {
-  const dark = isDark();
-  return {
-    dark,
-    text:    dark ? "#c3c2b7" : "#52514e",
-    faint:   "#898781",
-    grid:    dark ? "#2c2c2a" : "#e1e0d9",
-    axis:    dark ? "#383835" : "#c3c2b7",
-    surface: dark ? "#1a1a19" : "#fcfcfb",
-    border:  dark ? "rgba(255,255,255,0.12)" : "rgba(11,11,11,0.12)",
-  };
-}
-const hexA = (hex, a) => {
-  const n = parseInt(hex.slice(1), 16);
-  return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`;
-};
-function xAxisFormatter(ms, st) {
-  const d = new Date(ms);
-  const pad = n => String(n).padStart(2, "0");
-  const day = `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  if (day === st.last) return time;   // 同一天 → 只显示时刻,不再重复日期
-  st.last = day;                       // 跨天 → 显示日期
-  return day;
+/* ============ 轻量 Canvas 图表 ============ */
+class TinyChart {
+  constructor(container) {
+    this._container = container;
+    this._canvas = document.createElement('canvas');
+    this._ctx = this._canvas.getContext('2d');
+    container.appendChild(this._canvas);
+    this._data = [];
+    this._color = '#2a78d6';
+    this._mini = false;
+    this._disposed = false;
+    this._tooltipEl = null;
+    this._ro = new ResizeObserver(() => this._resize());
+    this._ro.observe(container);
+    this._resize();
+    this._bind();
+  }
+  _resize() {
+    if (this._disposed) return;
+    const rect = this._container.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    this._W = rect.width;
+    this._H = rect.height;
+    this._canvas.width = this._W * dpr;
+    this._canvas.height = this._H * dpr;
+    this._canvas.style.width = this._W + 'px';
+    this._canvas.style.height = this._H + 'px';
+    this._ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this._draw();
+  }
+  resize() { this._resize(); }
+  dispose() {
+    this._disposed = true;
+    this._ro.disconnect();
+    this._hideTip();
+    this._container.textContent = '';
+  }
+  setOption(opt) {
+    this._data = (opt.data || []).filter(p => p[1] !== null && !isNaN(p[1]));
+    this._color = opt.color || '#2a78d6';
+    this._mini = !!opt.mini;
+    this._draw();
+  }
+  _theme() {
+    const d = this._container.closest('[data-theme]');
+    const t = d ? d.getAttribute('data-theme') : '';
+    const dark = t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    return {
+      dark, text: dark ? '#c3c2b7' : '#52514e', faint: '#898781',
+      grid: dark ? '#2c2c2a' : '#e1e0d9', axis: dark ? '#383835' : '#c3c2b7',
+    };
+  }
+  _draw() {
+    const { ctx } = this, W = this._W, H = this._H, data = this._data, color = this._color;
+    ctx.clearRect(0, 0, W, H);
+    if (!data.length) return;
+    const { faint, grid, axis, text } = this._theme();
+    const pad = { t: 16, b: 24, l: this._mini ? 8 : 52, r: this._mini ? 8 : 64 };
+    const cw = W - pad.l - pad.r, ch = H - pad.t - pad.b;
+    if (cw <= 0 || ch <= 0) return;
+    const xs = data.map(p => p[0]), ys = data.map(p => p[1]);
+    const xMin = xs[0], xMax = xs[xs.length - 1];
+    let yMin = Math.min(...ys), yMax = Math.max(...ys);
+    const ySpan = yMax - yMin;
+    if (ySpan < 0.01) { yMin -= 0.5; yMax += 0.5; }
+    const yPad = ySpan * 0.05;
+    const yLo = yMin - yPad, yHi = yMax + yPad;
+    const x2c = x => pad.l + (x - xMin) / (xMax - xMin) * cw;
+    const y2c = y => pad.t + ch - (y - yLo) / (yHi - yLo) * ch;
+    // Grid
+    const gridLines = 4;
+    ctx.strokeStyle = grid; ctx.lineWidth = 0.5;
+    for (let i = 0; i <= gridLines; i++) {
+      const y = pad.t + ch / gridLines * i;
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + cw, y); ctx.stroke();
+    }
+    // Y-axis labels
+    if (!this._mini) {
+      ctx.fillStyle = faint; ctx.font = '11px system-ui,sans-serif'; ctx.textAlign = 'right';
+      const yFrac = ySpan < 1 ? 2 : (ySpan < 5 ? 1 : 0);
+      for (let i = 0; i <= gridLines; i++) {
+        const v = yHi - (yHi - yLo) / gridLines * i;
+        ctx.fillText(v.toFixed(yFrac), pad.l - 6, pad.t + ch / gridLines * i + 4);
+      }
+    }
+    // X-axis labels
+    ctx.fillStyle = faint; ctx.font = '11px system-ui,sans-serif'; ctx.textAlign = 'center';
+    const xLabels = 4; let lastDay = '';
+    for (let i = 0; i <= xLabels; i++) {
+      const t = xMin + (xMax - xMin) / xLabels * i;
+      const d = new Date(t);
+      const pad2 = n => String(n).padStart(2, '0');
+      const day = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+      const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+      const label = day === lastDay ? time : (lastDay = day, day);
+      ctx.fillText(label, x2c(t), pad.t + ch + 16);
+    }
+    // Smooth line
+    if (data.length < 2) {
+      ctx.beginPath(); ctx.arc(x2c(xs[0]), y2c(ys[0]), 3, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+      return;
+    }
+    // Area fill
+    const grad = ctx.createLinearGradient(0, pad.t, 0, pad.t + ch);
+    grad.addColorStop(0, color + '33');
+    grad.addColorStop(1, color + '05');
+    ctx.beginPath(); ctx.moveTo(x2c(xs[0]), pad.t + ch);
+    for (let i = 0; i < data.length; i++) {
+      const cx = x2c(xs[i]), cy = y2c(ys[i]);
+      if (i === 0) ctx.lineTo(cx, cy);
+      else {
+        const px = x2c(xs[i - 1]), py = y2c(ys[i - 1]);
+        const cpx1 = px + (cx - px) * 0.4, cpy1 = py;
+        const cpx2 = px + (cx - px) * 0.6, cpy2 = cy;
+        ctx.bezierCurveTo(cpx1, cpy1, cpx2, cpy2, cx, cy);
+      }
+    }
+    ctx.lineTo(x2c(xs[xs.length - 1]), pad.t + ch);
+    ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+    // Line
+    ctx.beginPath();
+    for (let i = 0; i < data.length; i++) {
+      const cx = x2c(xs[i]), cy = y2c(ys[i]);
+      if (i === 0) ctx.moveTo(cx, cy);
+      else {
+        const px = x2c(xs[i - 1]), py = y2c(ys[i - 1]);
+        ctx.bezierCurveTo(px + (cx - px) * 0.4, py, px + (cx - px) * 0.6, cy, cx, cy);
+      }
+    }
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+    // Dots
+    if (data.length <= 40) {
+      for (let i = 0; i < data.length; i++) {
+        ctx.beginPath(); ctx.arc(x2c(xs[i]), y2c(ys[i]), this._mini ? 2 : 3.5, 0, Math.PI * 2);
+        ctx.fillStyle = color; ctx.fill();
+      }
+    }
+    // End label (main chart only)
+    if (!this._mini && data.length) {
+      const last = data[data.length - 1];
+      const lbl = Number(last[1]).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' kWh';
+      ctx.fillStyle = color; ctx.font = '600 12px system-ui,sans-serif'; ctx.textAlign = 'left';
+      ctx.fillText(lbl, Math.min(x2c(last[0]) + 4, pad.l + cw - 80), y2c(last[1]) - 6);
+    }
+  }
+  _bind() {
+    const onMove = e => {
+      if (this._disposed || this._mini || !this._data.length) { this._hideTip(); return; }
+      const rect = this._canvas.getBoundingClientRect();
+      const mx = (e.clientX || 0) - rect.left, my = (e.clientY || 0) - rect.top;
+      const { pad, cw, xMin, xMax, data } = this;
+      if (!cw) return;
+      // Find nearest point
+      let best = 0, bestDist = Infinity;
+      for (let i = 0; i < data.length; i++) {
+        const cx = pad.l + (data[i][0] - xMin) / (xMax - xMin) * cw;
+        const d = Math.abs(cx - mx);
+        if (d < bestDist) { bestDist = d; best = i; }
+      }
+      if (bestDist > 30) { this._hideTip(); return; }
+      const p = data[best];
+      const d = new Date(p[0]);
+      const pad2 = n => String(n).padStart(2, '0');
+      const date = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+      this._showTip(mx, my, date, p[1]);
+    };
+    this._canvas.addEventListener('mousemove', onMove);
+    this._canvas.addEventListener('touchstart', e => {
+      const t = e.touches[0]; onMove({ clientX: t.clientX, clientY: t.clientY });
+    }, { passive: true });
+    this._canvas.addEventListener('mouseleave', () => this._hideTip());
+  }
+  _showTip(x, y, date, val) {
+    if (!this._tooltipEl) {
+      this._tooltipEl = document.createElement('div');
+      this._tooltipEl.style.cssText = 'position:fixed;pointer-events:none;z-index:60;font-size:12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 10px;box-shadow:0 4px 12px rgba(0,0,0,0.15);white-space:nowrap;transition:opacity .12s;';
+      document.body.appendChild(this._tooltipEl);
+    }
+    const fmt = Number(val).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    this._tooltipEl.innerHTML = `<span style="color:${this._color}">●</span> ${date}<br>剩余电量 <b>${fmt} kWh</b>`;
+    this._tooltipEl.style.display = 'block';
+    this._tooltipEl.style.opacity = '1';
+    const tw = this._tooltipEl.offsetWidth, th = this._tooltipEl.offsetHeight;
+    let l = x + 12, t = y - th - 12;
+    if (l + tw > window.innerWidth - 10) l = x - tw - 12;
+    if (t < 10) t = y + 12;
+    this._tooltipEl.style.left = l + 'px'; this._tooltipEl.style.top = t + 'px';
+  }
+  _hideTip() {
+    if (this._tooltipEl) { this._tooltipEl.style.opacity = '0'; this._tooltipEl.style.display = 'none'; }
+  }
 }
 
-/* ============ ECharts:图表 ============ */
 const CHARTS = [];
 function disposeCharts() {
-  CHARTS.forEach(c => { try { if (!c.isDisposed()) c.dispose(); } catch (e) {} });
+  CHARTS.forEach(c => { try { c.dispose(); } catch (e) {} });
   CHARTS.length = 0;
 }
 let resizeTimer = null;
-window.addEventListener("resize", () => {
+window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
-    CHARTS.forEach(c => { try { if (!c.isDisposed()) c.resize(); } catch (e) {} });
+    CHARTS.forEach(c => { try { c.resize(); } catch (e) {} });
   }, 120);
 });
 
-function buildChartOption(rows, color, mini) {
-  const t = themeColors();
-  const xState = { last: "" };   // 每个图表独立的跨天标签状态
-  const pts = rows.filter(r => r.surplus_charge !== null && !isNaN(r.surplus_charge))
-                  .map(r => [new Date(r.ts.replace(" ", "T")).getTime(), r.surplus_charge]);
-  // 纵轴小数位:数值跨度小还显示整数没意义,按跨度自适应(0/1/2 位)
-  const yVals = pts.map(p => p[1]);
-  const ySpan = yVals.length ? Math.max(...yVals) - Math.min(...yVals) : 0;
-  const yFrac = ySpan < 1 ? 2 : (ySpan < 5 ? 1 : 0);
-  return {
-    animation: false,
-    grid: { top: 16, right: mini ? 14 : 64, bottom: 24, left: mini ? 42 : 56 },
-    tooltip: {
-      trigger: "axis", confine: true,
-      backgroundColor: t.surface, borderColor: t.border, borderWidth: 1,
-      textStyle: { color: t.text, fontSize: 12 },
-      formatter: params => {
-        const p = params && params[0];
-        if (!p) return "";
-        const raw = p.value;
-        const ms = Array.isArray(raw) ? raw[0] : p.axisValue;
-        const v = Array.isArray(raw) ? raw[1] : raw;
-        const d = new Date(ms);
-        const pad = n => String(n).padStart(2, "0");
-        const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-        return `<span style="color:${color}">●</span> ${date}<br>剩余电量 <b>${fmt(v)} kWh</b>`;
-      },
-    },
-    xAxis: {
-      type: "time",
-      axisLine: { lineStyle: { color: t.axis } },
-      axisTick: { show: false },
-      axisLabel: { color: t.faint, fontSize: 11, hideOverlap: true,
-                   formatter: ms => xAxisFormatter(ms, xState) },
-      splitLine: { show: false },
-    },
-    yAxis: {
-      type: "value", scale: true,
-      axisLabel: {
-        color: t.faint, fontSize: 11,
-        formatter: v => v.toLocaleString("zh-CN",
-          { minimumFractionDigits: yFrac, maximumFractionDigits: yFrac }),
-      },
-      splitLine: { lineStyle: { color: t.grid } },
-    },
-    series: [{
-      type: "line",
-      data: pts,
-      smooth: true,
-      showSymbol: pts.length <= 40,
-      symbol: "circle",
-      symbolSize: mini ? 3 : 5,
-      lineStyle: { width: 2, color },
-      itemStyle: { color },
-      areaStyle: {
-        color: { type: "linear", x: 0, y: 0, x2: 0, y2: 1,
-                 colorStops: [{ offset: 0, color: hexA(color, 0.20) },
-                              { offset: 1, color: hexA(color, 0.02) }] },
-      },
-      ...(mini ? {} : {
-        endLabel: {
-          show: true, color, fontSize: 12, fontWeight: 600,
-          formatter: p => fmt(p.value[1]) + " kWh",
-        },
-      }),
-    }],
-  };
-}
-
 function renderChart() {
-  const holder = document.getElementById("chart-holder");
-  const hint = document.getElementById("chart-hint");
+  const holder = document.getElementById('chart-holder');
+  const hint = document.getElementById('chart-hint');
   disposeCharts();
-  holder.textContent = "";
-  if (typeof echarts === "undefined") {
-    hint.textContent = "—";
-    const div = document.createElement("div");
-    div.className = "empty";
-    div.textContent = "图表库加载失败";
-    holder.appendChild(div);
-    return;
-  }
+  holder.textContent = '';
   if (!state.data.length) {
-    hint.textContent = "—";
-    const div = document.createElement("div");
-    div.className = "empty";
-    div.textContent = "暂无数据";
-    holder.appendChild(div);
+    hint.textContent = '—';
+    const div = document.createElement('div');
+    div.className = 'empty'; div.textContent = '暂无数据'; holder.appendChild(div);
     return;
   }
   const groups = state.groups.filter(g =>
     g.rows.some(r => r.surplus_charge !== null && !isNaN(r.surplus_charge)));
   if (!groups.length) {
-    hint.textContent = "—";
-    const div = document.createElement("div");
-    div.className = "empty";
-    div.textContent = "暂无有效数据";
-    holder.appendChild(div);
+    hint.textContent = '—';
+    const div = document.createElement('div');
+    div.className = 'empty'; div.textContent = '暂无有效数据'; holder.appendChild(div);
     return;
   }
   if (groups.length === 1) {
-    hint.textContent = "剩余电量曲线(kWh)";
-    const el = document.createElement("div");
-    el.className = "chart-main";
-    holder.appendChild(el);
-    const ch = echarts.init(el);
-    ch.setOption(buildChartOption(groups[0].rows, roomColorFor(groups[0].rows[0]), false));
+    hint.textContent = '剩余电量曲线(kWh)';
+    const el = document.createElement('div');
+    el.className = 'chart-main'; holder.appendChild(el);
+    const ch = new TinyChart(el);
+    const pts = groups[0].rows.filter(r => r.surplus_charge !== null && !isNaN(r.surplus_charge))
+      .map(r => [new Date(r.ts.replace(' ', 'T')).getTime(), r.surplus_charge]);
+    ch.setOption({ data: pts, color: roomColorFor(groups[0].rows[0]), mini: false });
     CHARTS.push(ch);
   } else {
-    hint.textContent = "每间宿舍单独一张图 · 点击卡片放大";
-    const grid = document.createElement("div");
-    grid.className = "mini-grid";
-    const subs = [];
+    hint.textContent = '每间宿舍单独一张图 · 点击卡片放大';
+    const grid = document.createElement('div');
+    grid.className = 'mini-grid';
     groups.forEach((g, i) => {
-      const box = document.createElement("div");
-      box.className = "mini-card";
-      box.title = "点击放大查看该宿舍曲线";
-      box.addEventListener("click", () => focusRoom(g));
-      const hd = document.createElement("div");
-      hd.className = "mini-hd";
-      const dot = document.createElement("span");
-      dot.className = "mini-dot";
-      dot.style.background = roomColorFor(g.rows[0]);
-      const nm = document.createElement("span");
-      nm.className = "mini-name";
-      nm.title = g.label;
-      nm.textContent = g.label;
+      const box = document.createElement('div');
+      box.className = 'mini-card';
+      box.title = '点击放大查看该宿舍曲线';
+      box.addEventListener('click', () => focusRoom(g));
+      const hd = document.createElement('div');
+      hd.className = 'mini-hd';
+      const dot = document.createElement('span');
+      dot.className = 'mini-dot'; dot.style.background = roomColorFor(g.rows[0]);
+      const nm = document.createElement('span');
+      nm.className = 'mini-name'; nm.title = g.label; nm.textContent = g.label;
       const last = g.rows[g.rows.length - 1];
-      const val = document.createElement("span");
-      val.className = "mini-val";
-      val.textContent = fmt(last.surplus_charge) + " kWh";
+      const val = document.createElement('span');
+      val.className = 'mini-val'; val.textContent = fmt(last.surplus_charge) + ' kWh';
       hd.append(dot, nm, val);
-      const sub = document.createElement("div");
-      sub.className = "chart-holder sub";
+      const sub = document.createElement('div');
+      sub.className = 'chart-holder sub';
       box.append(hd, sub);
       grid.appendChild(box);
-      subs.push({ sub, rows: g.rows, color: roomColorFor(g.rows[0]) });
-    });
-    holder.appendChild(grid);
-    // 先挂到文档再初始化 ECharts,否则容器尺寸为 0,canvas 画不出来
-    subs.forEach(({ sub, rows, color }) => {
-      const ch = echarts.init(sub);
-      ch.setOption(buildChartOption(rows, color, true));
+      const pts = g.rows.filter(r => r.surplus_charge !== null && !isNaN(r.surplus_charge))
+        .map(r => [new Date(r.ts.replace(' ', 'T')).getTime(), r.surplus_charge]);
+      const ch = new TinyChart(sub);
+      ch.setOption({ data: pts, color: roomColorFor(g.rows[0]), mini: true });
       CHARTS.push(ch);
     });
+    holder.appendChild(grid);
   }
 }
 
@@ -1197,6 +1272,7 @@ function collectTarget() {
 }
 
 function collectAllProgress(d) {
+  document.getElementById("collect-cancel-btn").hidden = false;
   const btn = document.getElementById("collect-btn");
   const total = d.requested || 0;
   const done = d.completed || 0;
@@ -1207,6 +1283,7 @@ function collectAllProgress(d) {
   if (d.current && d.current.label) btn.title = `正在采集: ${d.current.label}`;
 }
 
+  document.getElementById("collect-cancel-btn").hidden = true;
 function resetCollectButton(btn, text) {
   btn.disabled = false;
   btn.classList.remove("busy");
@@ -1319,6 +1396,25 @@ initFilters();
 initBackButton();
 initSettings();
 document.getElementById("collect-btn").addEventListener("click", collectNow);
+document.getElementById("collect-cancel-btn").addEventListener("click", async function() {
+  const btn = document.getElementById("collect-cancel-btn");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/collect-all/cancel", { method: "POST" });
+    const d = await res.json().catch(() => ({}));
+    if (d.ok) toast("已取消采集任务");
+    else toast("取消失败: " + (d.error || "未知错误"), true);
+  } catch (e) {
+    toast("取消失败: " + e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.hidden = true;
+    document.getElementById("collect-btn").disabled = false;
+    document.getElementById("collect-btn").classList.remove("busy");
+    document.getElementById("collect-btn").style.setProperty("--progress", "0%");
+    document.getElementById("collect-btn").textContent = "⚡ 立即采集";
+  }
+});
 boot();   // 含 SSE 连接 + 缓存优先加载
 </script>
 </body>

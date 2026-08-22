@@ -8,7 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -171,12 +171,12 @@ func (d *DB) InsertReading(t config.Target, reading struct {
 	if prev != nil && prev.SurplusCharge != nil && reading.SurplusCharge != nil {
 		delta := *reading.SurplusCharge - *prev.SurplusCharge
 		if delta > 0.01 || delta < -0.01 {
-			log.Printf("入库: %s  surplusCharge=%v (剩余变化 %+.2f)", t.DisplayLabel(), *reading.SurplusCharge, delta)
+			slog.Info("入库", "room", t.DisplayLabel(), "surplus_charge", *reading.SurplusCharge, "delta", delta)
 		} else {
-			log.Printf("入库: %s  surplusCharge=%v", t.DisplayLabel(), *reading.SurplusCharge)
+			slog.Info("入库", "room", t.DisplayLabel(), "surplus_charge", *reading.SurplusCharge)
 		}
 	} else {
-		log.Printf("入库: %s  surplusCharge=%v", t.DisplayLabel(), reading.SurplusCharge)
+		slog.Info("入库", "room", t.DisplayLabel(), "surplus_charge", reading.SurplusCharge)
 	}
 	return nil
 }
@@ -204,6 +204,7 @@ func (d *DB) GetLatestReading(campus, building, room string) (*ReadingRow, error
 }
 
 // QueryReadings 查询读数记录。
+// 最多返回 10000 条记录以防止内存溢出。
 func (d *DB) QueryReadings(days int, campus, building, room string) ([]ReadingRow, error) {
 	query := `SELECT ts, epoch, room_label, surplus_charge, show_json, campus, building, room FROM readings`
 	var args []any
@@ -224,7 +225,7 @@ func (d *DB) QueryReadings(days int, campus, building, room string) ([]ReadingRo
 			query += " AND " + c
 		}
 	}
-	query += " ORDER BY epoch ASC"
+	query += " ORDER BY epoch ASC LIMIT 10000"
 
 	rows, err := d.db.Query(query, args...)
 	if err != nil {

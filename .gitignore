@@ -13,6 +13,8 @@ _archive/
 # Go 编译产物
 /elec
 /elec.exe
+/monitor
+/webapp
 bin/
 
 # 日志

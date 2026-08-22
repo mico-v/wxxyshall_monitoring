@@ -4,7 +4,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net/http"
 	"path"
 	"strings"
@@ -20,7 +20,8 @@ func init() {
 	var err error
 	staticFS, err = fs.Sub(embeddedFiles, "static")
 	if err != nil {
-		log.Fatalf("初始化嵌入文件系统失败: %v", err)
+		slog.Error("初始化嵌入文件系统失败", "err", err)
+		panic(err)
 	}
 }
 

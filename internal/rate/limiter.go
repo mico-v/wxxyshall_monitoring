@@ -18,6 +18,9 @@ type Limiter struct {
 // NewLimiter 创建一个新的限流器。
 // ratePerMinute 为每分钟允许的请求次数。<=0 表示不限流。
 func NewLimiter(ratePerMinute int) *Limiter {
+	if ratePerMinute <= 0 {
+		return &Limiter{window: 60 * time.Second, rate: 0, times: make([]time.Time, 0)}
+	}
 	return &Limiter{
 		window: 60 * time.Second,
 		rate:   ratePerMinute,

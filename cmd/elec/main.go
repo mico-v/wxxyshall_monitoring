@@ -24,7 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -44,13 +44,15 @@ import (
 )
 
 const (
-	installDir = "/opt/elec"
+	installDir  = "/opt/elec"
 	serviceName = "elec"
 )
 
 func main() {
-	// 设置数据目录环境变量，使 config 包使用正确的路径
-	os.Setenv("USTS_DATA_DIR", dataDir())
+	// 初始化结构化日志
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
 
 	// 解析子命令
 	args := os.Args[1:]
@@ -87,7 +89,7 @@ func main() {
 }
 
 func printHelp() {
-	fmt.Println(`宿舍电费监控 — 管理工具
+	fmt.Print(`宿舍电费监控 — 管理工具
 
 用法:
   elec                    启动服务（webapp + 采集循环）
@@ -260,7 +262,8 @@ func cmdRun() {
 	// 读取配置
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		log.Fatalf("配置加载失败: %v", err)
+		slog.Error("配置加载失败", "err", err)
+		os.Exit(1)
 	}
 
 	adminKey := os.Getenv("ADMIN_KEY")
@@ -284,7 +287,8 @@ func cmdRun() {
 		dir,
 	)
 	if err != nil {
-		log.Fatalf("服务器初始化失败: %v", err)
+		slog.Error("服务器初始化失败", "err", err)
+		os.Exit(1)
 	}
 
 	port := cfg.Port
@@ -306,23 +310,24 @@ func cmdRun() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("仪表盘启动: http://0.0.0.0:%d (Ctrl+C 退出)", port)
+		slog.Info("仪表盘启动", "addr", addr, "port", port)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP 服务器错误: %v", err)
+			slog.Error("HTTP 服务器错误", "err", err)
+			os.Exit(1)
 		}
 	}()
 
 	<-sigCh
-	log.Println("收到退出信号，正在关闭服务器...")
+	slog.Info("收到退出信号，正在关闭服务器")
 	server.CloseSSE()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := httpServer.Shutdown(ctx); err != nil {
-		log.Printf("服务器已关闭（部分 SSE 连接被强制断开: %v）", err)
+		slog.Warn("服务器已关闭（部分 SSE 连接被强制断开）", "err", err)
 	}
-	log.Println("服务器已关闭")
+	slog.Info("服务器已关闭")
 }
 
 // runCollectLoop 后台采集循环。
@@ -349,11 +354,11 @@ func runCollectLoop(cfg *config.Config) {
 func doCollect(cfg *config.Config) {
 	tok, err := config.LoadToken()
 	if err != nil || tok == nil || tok.AccessToken == "" {
-		log.Printf("采集跳过: 未找到 token")
+		slog.Warn("采集跳过: 未找到 token")
 		return
 	}
 	if auth.IsExpired(tok, 600) {
-		log.Printf("采集跳过: token 已过期，请重新登录")
+		slog.Warn("采集跳过: token 已过期，请重新登录")
 		return
 	}
 
@@ -364,7 +369,7 @@ func doCollect(cfg *config.Config) {
 
 	database, err := db.Open(filepath.Join(dataDir(), "electricity.db"))
 	if err != nil {
-		log.Printf("采集失败: 打开数据库: %v", err)
+		slog.Error("采集失败: 打开数据库", "err", err)
 		return
 	}
 	defer database.Close()
@@ -376,7 +381,7 @@ func doCollect(cfg *config.Config) {
 
 	for _, t := range targets {
 		if cfg.RateLimitPerMinute > 0 && !limiter.Allow() {
-			log.Printf("采集限流，跳过剩余宿舍")
+			slog.Warn("采集限流，跳过剩余宿舍")
 			break
 		}
 
@@ -385,10 +390,10 @@ func doCollect(cfg *config.Config) {
 			client = charge.NewClient(base, tok.AccessToken)
 			if err := client.Establish(t.FeeItemID, t.AppID); err != nil {
 				if charge.IsAuthError(err) {
-					log.Printf("登录态已失效，请重新登录")
+					slog.Warn("登录态已失效，请重新登录")
 					return
 				}
-				log.Printf("建立会话失败(%s): %v", t.DisplayLabel(), err)
+				slog.Warn("建立会话失败", "room", t.DisplayLabel(), "err", err)
 				continue
 			}
 			clients[t.FeeItemID] = client
@@ -397,10 +402,10 @@ func doCollect(cfg *config.Config) {
 		reading, err := client.QueryBalance(t.FeeItemID, t.Campus, t.Building, t.Room)
 		if err != nil {
 			if charge.IsAuthError(err) {
-				log.Printf("登录态已失效，请重新登录")
+				slog.Warn("登录态已失效，请重新登录")
 				return
 			}
-			log.Printf("查询失败(%s): %v", t.DisplayLabel(), err)
+			slog.Warn("查询失败", "room", t.DisplayLabel(), "err", err)
 			continue
 		}
 
@@ -421,7 +426,8 @@ func doCollect(cfg *config.Config) {
 func cmdCollect() {
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		log.Fatalf("配置加载失败: %v", err)
+		slog.Error("配置加载失败", "err", err)
+		os.Exit(1)
 	}
 	doCollect(cfg)
 }
@@ -528,7 +534,8 @@ func cmdUpdate() {
 func cmdToken() {
 	tok, err := config.LoadToken()
 	if err != nil {
-		log.Fatalf("读取 token 失败: %v", err)
+		slog.Error("读取 token 失败", "err", err)
+		os.Exit(1)
 	}
 	if tok == nil || tok.AccessToken == "" {
 		fmt.Println("未找到 token.json，请先运行 python3 login.py")

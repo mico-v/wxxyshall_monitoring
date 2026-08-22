@@ -1,7 +1,6 @@
-const CACHE_NAME = 'elec-monitor-v1';
+const CACHE_NAME = 'elec-monitor-v2';
 const STATIC_ASSETS = [
     '/',
-    '/static/echarts.min.js',
     '/404.html',
     '/offline.html',
     '/manifest.json',

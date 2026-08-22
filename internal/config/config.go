@@ -1,5 +1,5 @@
 // Package config 管理配置文件和 token 文件的读写。
-// 数据目录由 USTS_DATA_DIR 环境变量指定，默认为项目根目录。
+// 数据目录由 ELEc_DIR 环境变量指定，默认为 /opt/elec/data。
 package config
 
 import (
@@ -53,24 +53,12 @@ func (c *Config) GetTargets() []Target {
 }
 
 // DataDir 返回数据目录路径。
-// 优先使用 USTS_DATA_DIR 环境变量，否则返回项目根目录。
+// 优先使用 ELEc_DIR 环境变量，否则使用 ELEc_DIR/data。
 func DataDir() string {
-	if d := os.Getenv("USTS_DATA_DIR"); d != "" {
-		return d
+	if d := os.Getenv("ELEc_DIR"); d != "" {
+		return filepath.Join(d, "data")
 	}
-	// 默认：寻找 go.mod 所在目录作为项目根
-	wd, _ := os.Getwd()
-	root := wd
-	for {
-		if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
-			return root
-		}
-		parent := filepath.Dir(root)
-		if parent == root {
-			return wd
-		}
-		root = parent
-	}
+	return "/opt/elec/data"
 }
 
 // ConfigPath 返回 config.json 的完整路径。

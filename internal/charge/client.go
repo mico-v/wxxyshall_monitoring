@@ -13,7 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
@@ -120,7 +120,7 @@ func (c *Client) do(method, path string, params url.Values, body io.Reader) (*ht
 		if err != nil {
 			lastErr = err
 			if attempt < 2 {
-				log.Printf("请求 %s %s 失败，重试 %d/2: %v", method, path, attempt+1, err)
+				slog.Warn("请求失败，重试", "method", method, "path", path, "attempt", attempt+1, "err", err)
 				time.Sleep(time.Duration(1.5*float64(attempt+1)) * time.Second)
 				continue
 			}
@@ -146,7 +146,7 @@ func (c *Client) Establish(feeitemid, appID int) error {
 	}
 	c.mu.Unlock()
 
-	log.Printf("建立 charge 会话: feeitemid=%d appId=%d", feeitemid, appID)
+	slog.Info("建立 charge 会话", "feeitemid", feeitemid, "appId", appID)
 
 	params := url.Values{
 		"feeitemid":      {fmt.Sprintf("%d", feeitemid)},

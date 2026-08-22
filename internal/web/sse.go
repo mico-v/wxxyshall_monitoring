@@ -130,10 +130,11 @@ type JobProgressEvent struct {
 type JobState string
 
 const (
-	JobStateQueued  JobState = "queued"
-	JobStateRunning JobState = "running"
-	JobStateDone    JobState = "done"
-	JobStateFailed  JobState = "failed"
+	JobStateQueued    JobState = "queued"
+	JobStateRunning   JobState = "running"
+	JobStateDone      JobState = "done"
+	JobStateFailed    JobState = "failed"
+	JobStateCancelled JobState = "cancelled"
 )
 
 // JobCurrent 表示当前正在采集的宿舍。
@@ -272,6 +273,28 @@ func (jm *JobManager) FinishActive(id string) {
 	if jm.activeID == id {
 		jm.activeID = ""
 	}
+}
+
+// Cancel 尝试取消当前正在运行的采集任务。
+// 如果任务不存在或已结束，返回 false。
+func (jm *JobManager) Cancel() bool {
+	jm.mu.Lock()
+	defer jm.mu.Unlock()
+	if jm.activeID == "" {
+		return false
+	}
+	job, ok := jm.jobs[jm.activeID]
+	if !ok {
+		jm.activeID = ""
+		return false
+	}
+	if job.State != JobStateQueued && job.State != JobStateRunning {
+		return false
+	}
+	job.State = JobStateCancelled
+	job.UpdatedAt = time.Now()
+	jm.activeID = ""
+	return true
 }
 
 // cleanup 清理过期任务（超过 15 分钟）。
