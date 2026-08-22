@@ -63,6 +63,9 @@ jobs:
       - name: 打包
         run: |
           mkdir -p release
+          # Windows 加上 .exe 后缀
+          mv monitor-windows-amd64 monitor-windows-amd64.exe 2>/dev/null || true
+          mv webapp-windows-amd64 webapp-windows-amd64.exe 2>/dev/null || true
           tar czf release/monitor-linux-amd64.tar.gz monitor-linux-amd64 webapp-linux-amd64
           tar czf release/monitor-linux-arm64.tar.gz monitor-linux-arm64 webapp-linux-arm64
           tar czf release/monitor-darwin-amd64.tar.gz monitor-darwin-amd64 webapp-darwin-amd64
