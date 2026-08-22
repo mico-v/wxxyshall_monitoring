@@ -19,11 +19,19 @@ import (
 )
 
 func main() {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		log.Fatalf("配置加载失败: %v", err)
+	}
+
 	host := flag.String("host", "127.0.0.1", "监听地址")
-	port := flag.String("port", "8080", "监听端口")
+	port := flag.String("port", "", "监听端口（默认从 config.json 的 port 字段读取，仍为空则 8080）")
 	flag.Parse()
 
 	adminKey := os.Getenv("ADMIN_KEY")
+	if adminKey == "" {
+		adminKey = cfg.AdminKey
+	}
 	rootDir := config.DataDir()
 
 	server, err := web.NewServer(
@@ -37,7 +45,16 @@ func main() {
 		log.Fatalf("服务器初始化失败: %v", err)
 	}
 
-	addr := *host + ":" + *port
+	// 端口优先级: 命令行 > config.json > 8080
+	listenPort := *port
+	if listenPort == "" {
+		if cfg.Port > 0 {
+			listenPort = fmt.Sprintf("%d", cfg.Port)
+		} else {
+			listenPort = "8080"
+		}
+	}
+	addr := *host + ":" + listenPort
 	httpServer := &http.Server{
 		Addr:         addr,
 		Handler:      server.Handler(),

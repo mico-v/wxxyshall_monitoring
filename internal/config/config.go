@@ -35,11 +35,13 @@ func (t Target) DisplayLabel() string {
 // Config 是 config.json 的完整映射。
 type Config struct {
 	Username           string   `json:"username"`
+	Port               int      `json:"port,omitempty"`
 	BaseURL            string   `json:"base_url"`
 	Targets            []Target `json:"targets"`
 	PollIntervalMin    int      `json:"poll_interval_minutes"`
 	RateLimitPerMinute int      `json:"rate_limit_per_minute"`
 	ChromiumPath       string   `json:"chromium_path,omitempty"`
+	AdminKey           string   `json:"admin_key,omitempty"`
 }
 
 // GetTargets 返回监控目标列表，优先返回 Targets 数组。
@@ -108,6 +110,9 @@ func LoadConfig() (*Config, error) {
 	}
 	if cfg.PollIntervalMin <= 0 {
 		cfg.PollIntervalMin = 60
+	}
+	if cfg.Port <= 0 {
+		cfg.Port = 8080
 	}
 	return &cfg, nil
 }

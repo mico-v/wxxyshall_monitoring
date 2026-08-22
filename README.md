@@ -15,7 +15,7 @@ playwright install chromium
 python3 login.py
 
 # 保存本地并推送到远程服务器
-USTS_ADMIN_KEY=<key> python3 login.py --push http://服务器IP:8080
+ADMIN_KEY=<key> python3 login.py --push http://服务器IP:8080
 ```
 
 浏览器会自动弹出来，学号已预填好，你手动点密码（安全键盘）→ 点登录即可。脚本会自动捕获 token 保存到 `token.json`，如果指定了 `--push` 还会推送到远程服务器。
@@ -66,7 +66,7 @@ elec-monitor config          # 查看配置信息
 cat /opt/elec-monitor/data/.admin_key
 
 # 推送 token 到服务器（约 70 天一次，在本地机器执行）
-USTS_ADMIN_KEY=<key> python3 login.py --push http://服务器IP:8080
+ADMIN_KEY=<key> python3 login.py --push http://服务器IP:8080
 ```
 
 ### 4. 配置

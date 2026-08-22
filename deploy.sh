@@ -103,11 +103,13 @@ setup_data_dir() {
   fi
   export ADMIN_KEY
 
-  # 把 ADMIN_KEY 写入 config.json 的 environment 字段
-  # 如果 config.json 还没有 admin_key 字段，追加
-  if ! grep -q '"admin_key"' "${DATA_DIR}/config.json" 2>/dev/null; then
-    # 在 config.json 的 username 行后插入 admin_key
-    sed -i "s/\"username\":.*/\"admin_key\": \"${ADMIN_KEY}\",\n  \0/" "${DATA_DIR}/config.json" 2>/dev/null || true
+  # 把 ADMIN_KEY 写入 config.json 的 admin_key 字段
+  # 如果 config.json 已有 admin_key 字段，更新它
+  if grep -q '"admin_key"' "${DATA_DIR}/config.json" 2>/dev/null; then
+    sed -i "s/\"admin_key\":.*/\"admin_key\": \"${ADMIN_KEY}\",/" "${DATA_DIR}/config.json" 2>/dev/null || true
+  else
+    # 在 username 行后插入 admin_key
+    sed -i "s/\"username\":.*/\"username\": \"$(grep '\"username\"' "${DATA_DIR}/config.json" | sed 's/.*"username": "\(.*\)",/\1/' 2>/dev/null || echo "")\",\n  \"admin_key\": \"${ADMIN_KEY}\",/" "${DATA_DIR}/config.json" 2>/dev/null || true
   fi
 
   chmod 755 "${DATA_DIR}"
@@ -345,13 +347,13 @@ case "$CMD" in
   push-token)
     if [ -z "${2:-}" ]; then
       echo "用法: ./elec.sh push-token <服务器URL>"
-      echo "需要 USTS_ADMIN_KEY 环境变量"
+      echo "需要 ADMIN_KEY 环境变量"
       exit 1
     fi
     ADMIN_KEY=$(cat /opt/elec-monitor/data/.admin_key 2>/dev/null || echo "")
     echo "服务器 ADMIN_KEY: $ADMIN_KEY"
     echo "推送 token 到 $2 ..."
-    echo "本地执行: USTS_ADMIN_KEY=$ADMIN_KEY python3 login.py --push $2"
+    echo "本地执行: ADMIN_KEY=$ADMIN_KEY python3 login.py --push $2"
     ;;
   *)
     echo "宿舍电费监控 - 管理工具"
@@ -372,7 +374,7 @@ case "$CMD" in
     echo ""
     echo "示例:"
     echo "  ./elec.sh status"
-    echo "  USTS_ADMIN_KEY=xxx ./elec.sh push-token http://server:8080"
+    echo "  ADMIN_KEY=xxx ./elec.sh push-token http://server:8080"
     ;;
 esac
 ALIASEOF

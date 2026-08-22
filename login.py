@@ -10,7 +10,7 @@
   python3 login.py --browser /usr/bin/chromium           # 指定浏览器路径
 
 环境变量:
-  USTS_ADMIN_KEY  推送 token 时用的管理密钥（与服务器 ADMIN_KEY 一致）
+  ADMIN_KEY       推送 token 时用的管理密钥
 """
 from __future__ import annotations
 import asyncio
@@ -43,9 +43,9 @@ def push_token(server_url: str, tok: dict) -> None:
     """推送 token 到远程服务器。"""
     import requests
 
-    key = os.environ.get("USTS_ADMIN_KEY")
+    key = os.environ.get("ADMIN_KEY")
     if not key:
-        print("[x] 需要 USTS_ADMIN_KEY 环境变量来推送 token（与服务器 ADMIN_KEY 一致）")
+        print("[x] 需要 ADMIN_KEY 环境变量来推送 token（与服务器 ADMIN_KEY 一致）")
         sys.exit(1)
 
     url = server_url.rstrip("/") + "/api/token"
