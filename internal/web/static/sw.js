@@ -1,6 +1,5 @@
-const CACHE_NAME = 'elec-monitor-v2';
+const CACHE_NAME = 'elec-monitor-v3';
 const STATIC_ASSETS = [
-    '/',
     '/404.html',
     '/offline.html',
     '/manifest.json',
@@ -31,8 +30,8 @@ self.addEventListener('fetch', event => {
     // SSE 端点不缓存
     if (url.pathname === '/api/events') return;
 
-    // 静态资源: Cache First
-    if (STATIC_ASSETS.includes(url.pathname) || url.pathname.startsWith('/static/')) {
+    // 带版本号的静态资源: Cache First
+    if (url.pathname.startsWith('/static/')) {
         event.respondWith(cacheFirst(event.request));
         return;
     }
@@ -43,11 +42,14 @@ self.addEventListener('fetch', event => {
         return;
     }
 
-    // 导航请求: Network First, fallback to offline page
+    // 页面(含 / 与 /room/...): Network First,离线回退 -> 部署后自动生效不陈旧
     if (event.request.mode === 'navigate') {
         event.respondWith(networkFirst(event.request, '/offline.html'));
         return;
     }
+
+    // 其它(manifest/404 等): Network First, fallback to cache
+    event.respondWith(networkFirst(event.request));
 });
 
 async function cacheFirst(request) {
