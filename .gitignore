@@ -11,13 +11,8 @@ data/
 _archive/
 
 # Go 编译产物
-/monitor
-/webapp
-/report
-/discover
-/query
-/push_token
-/token_status
+/elec
+/elec.exe
 bin/
 
 # 日志

@@ -40,9 +40,7 @@ jobs:
         run: |
           mkdir -p dist
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
-            go build -ldflags="-s -w" -o dist/monitor-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/monitor/
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
-            go build -ldflags="-s -w" -o dist/webapp-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/webapp/
+            go build -ldflags="-s -w" -o dist/elec-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/elec/
 
       - uses: actions/upload-artifact@v4
         with:
@@ -67,13 +65,11 @@ jobs:
       - name: 打包
         run: |
           mkdir -p release
-          # Windows 加上 .exe 后缀
-          mv monitor-windows-amd64 monitor-windows-amd64.exe 2>/dev/null || true
-          mv webapp-windows-amd64 webapp-windows-amd64.exe 2>/dev/null || true
-          tar czf release/monitor-linux-amd64.tar.gz monitor-linux-amd64 webapp-linux-amd64
-          tar czf release/monitor-linux-arm64.tar.gz monitor-linux-arm64 webapp-linux-arm64
-          tar czf release/monitor-darwin-amd64.tar.gz monitor-darwin-amd64 webapp-darwin-amd64
-          zip release/monitor-windows-amd64.zip monitor-windows-amd64.exe webapp-windows-amd64.exe
+          mv elec-windows-amd64 elec-windows-amd64.exe 2>/dev/null || true
+          gzip -c elec-linux-amd64 > release/elec-linux-amd64.gz
+          gzip -c elec-linux-arm64 > release/elec-linux-arm64.gz
+          gzip -c elec-darwin-amd64 > release/elec-darwin-amd64.gz
+          zip release/elec-windows-amd64.zip elec-windows-amd64.exe 2>/dev/null || true
 
       - uses: softprops/action-gh-release@v2
         with:

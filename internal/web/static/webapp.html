@@ -1,0 +1,1325 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>宿舍电费监控</title>
+<link rel="icon" href="data:,">
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#2a78d6">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<script>
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js')
+    .catch(function(e) { console.warn('SW 注册失败:', e); });
+}
+</script>
+<style>
+  :root {
+    color-scheme: light;
+    --page:        #f9f9f7;
+    --surface:     #fcfcfb;
+    --ink-1:       #0b0b0b;
+    --ink-2:       #52514e;
+    --ink-3:       #898781;
+    --grid:        #e1e0d9;
+    --axis:        #c3c2b7;
+    --series-1:    #2a78d6;
+    --good:        #0ca30c;
+    --warning:     #fab219;
+    --serious:     #ec835a;
+    --critical:    #d03b3b;
+    --border:      rgba(11, 11, 11, 0.10);
+    --shadow:      0 1px 2px rgba(11,11,11,0.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --page:        #0d0d0d;
+      --surface:     #1a1a19;
+      --ink-1:       #ffffff;
+      --ink-2:       #c3c2b7;
+      --ink-3:       #898781;
+      --grid:        #2c2c2a;
+      --axis:        #383835;
+      --series-1:    #3987e5;
+      --border:      rgba(255, 255, 255, 0.10);
+      --shadow:      0 1px 2px rgba(0,0,0,0.3);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:        #0d0d0d;
+    --surface:     #1a1a19;
+    --ink-1:       #ffffff;
+    --ink-2:       #c3c2b7;
+    --ink-3:       #898781;
+    --grid:        #2c2c2a;
+    --axis:        #383835;
+    --series-1:    #3987e5;
+    --border:      rgba(255, 255, 255, 0.10);
+    --shadow:      0 1px 2px rgba(0,0,0,0.3);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink-1);
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC",
+                 "Microsoft YaHei", sans-serif;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 20px 48px; min-width: 0; }
+  @media (max-width: 480px) { .wrap { padding: 16px 12px 36px; } }
+
+  /* ---- 头部 ---- */
+  header.top {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap; margin-bottom: 20px;
+  }
+  h1 { font-size: 20px; font-weight: 650; margin: 0; }
+  .sub { color: var(--ink-2); font-size: 13px; margin-top: 2px; }
+  .theme-btn {
+    font: inherit; font-size: 13px; color: var(--ink-2);
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 12px; cursor: pointer;
+  }
+  .theme-btn:hover { color: var(--ink-1); }
+
+  /* ---- KPI 行 ---- */
+  .kpis {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+    margin-bottom: 16px;
+  }
+  @media (max-width: 720px) { .kpis { grid-template-columns: repeat(2, 1fr); } }
+  .kpi {
+    min-width: 0; overflow: hidden;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px 16px; box-shadow: var(--shadow);
+  }
+  .kpi .label { font-size: 12px; color: var(--ink-2); }
+  .kpi .value {
+    min-width: 0; overflow-wrap: anywhere;
+    font-size: 28px; font-weight: 650; margin-top: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+  .kpi .value.hero { font-size: 40px; }
+  .kpi .delta { font-size: 12px; margin-top: 2px; }
+  .up   { color: var(--good); }
+  .down { color: var(--critical); }
+  .flat { color: var(--ink-3); }
+
+  /* ---- 状态徽标 ---- */
+  .status {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 13px; padding: 5px 11px; border-radius: 999px;
+    background: var(--surface); border: 1px solid var(--border);
+    margin-top: 8px;
+  }
+  .status .dot { width: 9px; height: 9px; border-radius: 50%; }
+  .status.good    .dot { background: var(--good); }
+  .status.warning .dot { background: var(--warning); }
+  .status.serious .dot { background: var(--serious); }
+  .status.critical .dot { background: var(--critical); }
+
+  /* ---- 筛选行 ---- */
+  .filters { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .filters .seg {
+    display: inline-flex; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 9px; overflow: hidden;
+  }
+  .filters button {
+    font: inherit; font-size: 13px; color: var(--ink-2);
+    background: transparent; border: 0; padding: 7px 14px; cursor: pointer;
+  }
+  .filters button.active { background: var(--series-1); color: #fff; }
+
+  .head-actions { display: flex; gap: 8px; flex-wrap: wrap; max-width: 100%; }
+  .head-actions .btn, .head-actions .theme-btn { flex: 0 1 auto; }
+  #back-btn { display: inline-flex; align-items: center; gap: 5px; }
+  #back-btn[hidden] { display: none; }
+  @media (max-width: 480px) {
+    header.top { align-items: stretch; }
+    header.top > div:first-child { min-width: 0; }
+    .head-actions { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .head-actions button { min-width: 0; width: 100%; }
+    .head-actions #collect-btn { grid-column: 1 / -1; }
+  }
+
+  /* ---- 设置弹窗 ---- */
+  .modal-overlay {
+    position: fixed; inset: 0; z-index: 50;
+    background: rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(2px);
+    display: flex; align-items: flex-start; justify-content: center;
+    padding: 8vh 16px 24px;
+  }
+  .modal-overlay[hidden] { display: none; }
+  .modal {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; box-shadow: 0 12px 40px rgba(0,0,0,0.25);
+    width: 100%; max-width: 560px; max-height: 82vh; overflow: auto;
+  }
+  .modal-hd {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 20px 0;
+  }
+  .modal-hd h2 { font-size: 16px; font-weight: 650; margin: 0; }
+  .modal-bd { padding: 12px 20px 20px; }
+  .modal-bd h3 {
+    font-size: 13px; font-weight: 600; color: var(--ink-2);
+    margin: 18px 0 8px;
+  }
+  .modal-bd h3:first-child { margin-top: 8px; }
+
+  .target-list { display: flex; flex-direction: column; gap: 6px; }
+  .target-item {
+    display: flex; align-items: center; gap: 8px;
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 10px; font-size: 13px;
+  }
+  .target-item .tl-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .target-item .tl-id { color: var(--ink-3); font-size: 11px;
+    font-variant-numeric: tabular-nums; }
+  .empty-hint { color: var(--ink-3); font-size: 12px; padding: 6px 2px; }
+
+  .picker { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 8px; }
+  @media (max-width: 560px) { .picker { grid-template-columns: 1fr 1fr; } }
+  .picker select {
+    font: inherit; font-size: 13px; color: var(--ink-1);
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 7px 8px; min-width: 0;
+  }
+  .picker select:disabled { opacity: 0.45; }
+  .btn {
+    font: inherit; font-size: 13px; font-weight: 600;
+    color: #fff; background: var(--series-1); border: 0;
+    border-radius: 8px; padding: 7px 14px; cursor: pointer;
+  }
+  .btn:disabled { opacity: 0.4; cursor: default; }
+  .tag-field { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; color: var(--ink-2); }
+  .tag-field input {
+    flex: 1; min-width: 0; font: inherit; font-size: 13px; color: var(--ink-1);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px;
+  }
+  @media (max-width: 480px) { .tag-field { align-items: stretch; flex-direction: column; gap: 4px; } }
+  .label-hint { margin-top: 8px; font-size: 12px; color: var(--ink-2); min-height: 18px; }
+
+  /* ---- 卡片 ---- */
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; box-shadow: var(--shadow); margin-bottom: 16px;
+  }
+  .card .card-hd {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding: 14px 18px 0; gap: 12px; flex-wrap: wrap;
+  }
+  .card .card-hd h2 { font-size: 15px; font-weight: 650; margin: 0; }
+  .card .card-hd .hint { font-size: 12px; color: var(--ink-3); }
+  .card .card-bd { padding: 12px 18px 16px; min-width: 0; }
+  #detail-card .card-bd { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  /* ---- 图表(ECharts) ---- */
+  .chart-holder { position: relative; }
+  .chart-main { height: 320px; width: 100%; }
+  .chart-holder.sub { height: 150px; width: 100%; }
+  .chart-main, .chart-holder.sub { min-width: 0; }
+
+  /* ---- 表格 ---- */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th {
+    text-align: left; font-weight: 550; color: var(--ink-3);
+    font-size: 12px; padding: 6px 10px; border-bottom: 1px solid var(--grid);
+  }
+  tbody td {
+    padding: 7px 10px; border-bottom: 1px solid var(--grid);
+    font-variant-numeric: tabular-nums;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.num { text-align: right; }
+  .neg { color: var(--critical); font-weight: 600; }
+  .empty { color: var(--ink-3); text-align: center; padding: 40px 0; font-size: 13px; }
+
+  /* 刷新时保持帧,不闪跳 */
+  #dash.refreshing .kpis,
+  #dash.refreshing .chart-holder,
+  #dash.refreshing table { opacity: 0.55; transition: opacity 0.15s; }
+
+  /* ---- 多宿舍:每间一张小图 + 房间 KPI 卡 ---- */
+  .kpis.rooms { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
+  .kpi.room { border-top: 3px solid var(--accent); }
+  .kpi .unit { font-size: 15px; color: var(--ink-2); }
+
+  .mini-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+    gap: 14px;
+  }
+  .mini-card {
+    min-width: 0; overflow: hidden;
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--page); padding: 10px 12px 4px;
+  }
+  .mini-hd { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; min-width: 0; }
+  .mini-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .mini-name {
+    min-width: 0; flex: 1; font-size: 13px; font-weight: 600; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+  .mini-val { margin-left: auto; min-width: 0; flex: none; font-size: 12px; color: var(--ink-2);
+              font-variant-numeric: tabular-nums; }
+  .chart-holder.sub svg { max-width: 100%; }
+
+  /* ---- toast ---- */
+  #toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 12px);
+    background: var(--ink-1); color: var(--page);
+    padding: 9px 16px; border-radius: 999px; font-size: 13px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25); opacity: 0; pointer-events: none;
+    transition: opacity .18s ease, transform .18s ease; z-index: 100;
+    max-width: 80vw;
+  }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+  #toast.err { background: var(--critical); color: #fff; }
+
+  /* ---- 精致化细节 ---- */
+  :focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+  button, select, input { font-family: inherit; }
+  .theme-btn, .btn, .picker select {
+    transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
+  }
+  .kpi { transition: transform .15s ease, box-shadow .15s ease; }
+  .kpi:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(0, 0, 0, 0.10); }
+  .card { transition: box-shadow .15s ease; }
+  tbody tr:hover td { background: rgba(127, 127, 127, 0.06); }
+  .room-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+              margin-right: 7px; vertical-align: middle; flex: none; }
+  .col-room { white-space: nowrap; }
+  .mini-card { transition: border-color .15s ease; cursor: pointer; }
+  .mini-card:hover { border-color: var(--axis); }
+  .kpi.room { cursor: pointer; }
+  #collect-btn {
+    --progress: 0%;
+    background: linear-gradient(90deg, var(--series-1) var(--progress), var(--surface) var(--progress));
+    color: var(--ink-1);
+  }
+  #collect-btn.busy { color: #fff; }
+  @media (max-width: 720px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 480px) {
+    .kpis:not(.rooms) { grid-template-columns: 1fr; }
+    .kpi .value.hero { font-size: clamp(30px, 12vw, 40px); }
+    .kpi .value.updated { font-size: 15px !important; line-height: 1.35; overflow-wrap: anywhere; }
+    .chart-main { height: 260px; }
+    .chart-holder.sub { height: 128px; }
+    .picker { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 360px) {
+    .head-actions { grid-template-columns: 1fr; }
+    .head-actions #collect-btn { grid-column: auto; }
+    .kpis.rooms { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>宿舍电费监控</h1>
+      <div class="sub" id="room-sub">—</div>
+    </div>
+    <div class="head-actions">
+      <button class="btn" id="collect-btn" type="button">⚡ 立即采集</button>
+      <button class="theme-btn" id="settings-btn" type="button">查询设置</button>
+      <button class="theme-btn" id="theme-btn" type="button">深色</button>
+    </div>
+  </header>
+
+  <div id="dash">
+    <!-- 当前状态 -->
+    <div class="kpis" id="kpis"></div>
+
+    <!-- 时间筛选 + 返回全览 -->
+    <div class="filters" id="filters">
+      <button id="back-btn" class="theme-btn" type="button" hidden>← 全部宿舍</button>
+      <div class="seg" role="group" aria-label="时间范围">
+        <button data-days="7">7 天</button>
+        <button data-days="30">30 天</button>
+        <button data-days="90">90 天</button>
+        <button data-days="0" class="active">全部</button>
+      </div>
+    </div>
+
+    <!-- 剩余电量曲线 -->
+    <div class="card">
+      <div class="card-hd">
+        <h2>剩余电量曲线</h2>
+        <span class="hint" id="chart-hint">—</span>
+      </div>
+      <div class="card-bd">
+        <div class="chart-holder" id="chart-holder"></div>
+      </div>
+    </div>
+
+    <!-- 读数明细 -->
+    <div class="card" id="detail-card" hidden>
+      <div class="card-hd">
+        <h2>读数明细</h2>
+        <span class="hint" id="table-hint">—</span>
+      </div>
+      <div class="card-bd" id="table-wrap"></div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<!-- 查询设置弹窗 -->
+<div class="modal-overlay" id="settings-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-hd">
+      <h2 id="settings-title">查询设置</h2>
+      <button class="theme-btn" id="modal-close" type="button">✕</button>
+    </div>
+    <div class="modal-bd">
+      <h3>监控宿舍</h3>
+      <div id="target-list" class="target-list"></div>
+
+      <h3>添加宿舍(电费)</h3>
+      <div class="picker">
+        <select id="pick-campus"><option value="">— 选择校区 —</option></select>
+        <select id="pick-building" disabled><option value="">— 选择楼栋 —</option></select>
+        <select id="pick-room" disabled><option value="">— 选择房间 —</option></select>
+        <button id="pick-add" class="btn" disabled>添加</button>
+      </div>
+      <label class="tag-field" for="pick-tag">宿舍 tag / 别名
+        <input id="pick-tag" type="text" maxlength="40" placeholder="例如：我的宿舍">
+      </label>
+      <div class="label-hint" id="pick-preview"></div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/echarts.min.js"></script>
+<script>
+"use strict";
+
+/* ============ 主题切换(浅/深) ============ */
+const THEME_KEY = "elec-theme";
+function applyTheme(t) {
+  document.documentElement.setAttribute("data-theme", t);
+  document.getElementById("theme-btn").textContent = t === "dark" ? "浅色" : "深色";
+}
+function initTheme() {
+  const saved = localStorage.getItem(THEME_KEY);
+  if (saved) applyTheme(saved);
+}
+document.getElementById("theme-btn").addEventListener("click", () => {
+  const cur = document.documentElement.getAttribute("data-theme") ||
+               (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  const next = cur === "dark" ? "light" : "dark";
+  applyTheme(next);
+  localStorage.setItem(THEME_KEY, next);
+  render();   // 重渲图表以适配新主题色
+});
+
+/* ============ SSE 实时推送 ============ */
+let eventSource = null;
+let sseConnected = false;
+let pollTimer = null;
+
+function connectSSE() {
+  if (eventSource) { eventSource.close(); }
+  try {
+    eventSource = new EventSource('/api/events');
+  } catch (e) {
+    console.warn('SSE 初始化失败:', e);
+    startPollingFallback();
+    return;
+  }
+
+  eventSource.addEventListener('reading', function(e) {
+    try {
+      const data = JSON.parse(e.data);
+      if (!state.room ||
+          (state.room.campus === data.campus &&
+           state.room.building === data.building &&
+           state.room.room === data.room)) {
+        refresh();
+      }
+    } catch (err) { console.warn('SSE reading 解析失败:', err); }
+  });
+
+  eventSource.addEventListener('collect-progress', function(e) {
+    try {
+      const data = JSON.parse(e.data);
+      collectAllProgress(data);
+    } catch (err) { console.warn('SSE collect-progress 解析失败:', err); }
+  });
+
+  eventSource.addEventListener('heartbeat', function() {
+    sseConnected = true;
+  });
+
+  eventSource.onerror = function() {
+    sseConnected = false;
+    eventSource.close();
+    startPollingFallback();
+  };
+
+  sseConnected = true;
+}
+
+function startPollingFallback() {
+  if (pollTimer) { stopPollingFallback(); }
+  pollTimer = setInterval(function() {
+    if (!sseConnected) { refresh(); }
+  }, 60000);
+}
+
+function stopPollingFallback() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+const fmt = v => (v === null || v === undefined || isNaN(v))
+  ? "—"
+  : Number(v).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+function fullTs(ts) {
+  const d = new Date(ts.replace(" ", "T"));
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/* 低电量分级: >=30 充足, 10-30 偏低, 5-10 不足, <5 欠费/临界 */
+function balanceStatus(v) {
+  if (v === null || v === undefined || isNaN(v)) return { level: "", text: "暂无数据" };
+  if (v < 0)   return { level: "critical", text: "已欠费" };
+  if (v < 5)   return { level: "critical", text: "即将断电" };
+  if (v < 10)  return { level: "serious",  text: "余额不足" };
+  if (v < 30)  return { level: "warning",  text: "余额偏低" };
+  return { level: "good", text: "余额充足" };
+}
+
+/* ============ 多宿舍:配色与分组 ============ */
+const PALETTE = ["#2a78d6", "#d97706", "#059669", "#be4d9b", "#dc2626",
+                 "#7c6cd6", "#0e9db0", "#9a9e1f", "#d0660e", "#4563c9"];
+const roomColor = i => PALETTE[i % PALETTE.length];
+function roomColorFor(r) {
+  const text = roomKey(r);
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) hash = (hash * 31 + text.charCodeAt(i)) | 0;
+  return PALETTE[Math.abs(hash) % PALETTE.length];
+}
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const roomKey = r => [r.campus, r.building, r.room].join("|");
+function targetLabel(t) {
+  const label = String(t?.label ?? "").trim();
+  return label || [t?.campus, t?.building, t?.room].filter(Boolean).join("/") || "未知宿舍";
+}
+function labelForRow(r) {
+  const t = state.targets.find(x => roomKey(x) === roomKey(r));
+  return t ? targetLabel(t) : (r.display_label || r.room_label || roomKey(r) || "未知宿舍");
+}
+function groupByRoom(rows) {
+  const m = new Map();
+  rows.forEach(r => {
+    const k = roomKey(r);
+    if (!m.has(k)) m.set(k, { label: labelForRow(r), rows: [] });
+    m.get(k).rows.push(r);
+  });
+  const g = [...m.values()];
+  g.sort((a, b) => a.label.localeCompare(b.label, "zh"));
+  return g;
+}
+
+/* ============ 数据获取 ============ */
+let state = {
+  days: 0,
+  data: [],
+  targets: [],        // 来自 /api/config
+  room: null,         // 当前查看的宿舍 {campus,building,room,label},null=全部
+};
+
+/* ============ 路径导航(History API) ============ */
+// 每间宿舍一个独立 URL:/room/<campus>/<building>/<room>;"/" = 全部宿舍全览。
+// 视图状态(state.room)与 URL 同步:pushState 记录跳转,popstate 响应前进/后退。
+const ROOM_PATH = /^\/room\/([^/]+)\/([^/]+)\/([^/]+)\/?$/;
+function roomFromPath() {
+  const m = location.pathname.match(ROOM_PATH);
+  return m ? { campus: decodeURIComponent(m[1]),
+               building: decodeURIComponent(m[2]),
+               room: decodeURIComponent(m[3]) } : null;
+}
+function pathFor(room) {
+  if (!room) return "/";
+  return "/room/" + [room.campus, room.building, room.room]
+           .map(encodeURIComponent).join("/");
+}
+function navigate(room, replace = false) {
+  state.room = room;
+  window.scrollTo(0, 0);
+  history[replace ? "replaceState" : "pushState"]({ room }, "", pathFor(room));
+  refresh();
+}
+window.addEventListener("popstate", () => {   // 浏览器前进/后退
+  state.room = roomFromPath();
+  window.scrollTo(0, 0);
+  refresh();
+});
+
+async function fetchReadings() {
+  const q = new URLSearchParams();
+  if (state.days) q.set("days", state.days);
+  if (state.room) {
+    q.set("campus", state.room.campus);
+    q.set("building", state.room.building);
+    q.set("room", state.room.room);
+  }
+  const r = await fetch("/api/readings?" + q, { cache: "no-store" });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return await r.json();
+}
+
+/* 刷新序号:并发刷新时丢弃过期结果,避免旧 fetch 覆盖新数据(钻取/返回快速切换时) */
+let refreshSeq = 0;
+async function refresh() {
+  const seq = ++refreshSeq;
+  const dash = document.getElementById("dash");
+  dash.classList.add("refreshing");
+  try {
+    const data = await fetchReadings();
+    if (seq !== refreshSeq) return;      // 已有更新的刷新,丢弃本次结果
+    state.data = data;
+    render();
+  } catch (e) {
+    if (seq !== refreshSeq) return;
+    console.error("读取失败:", e);
+  } finally {
+    if (seq === refreshSeq) dash.classList.remove("refreshing");
+  }
+}
+
+/* ============ 渲染 ============ */
+function render() {
+  state.groups = groupByRoom(state.data);
+  state.colorByKey = {};
+  state.groups.forEach(g => {
+    state.colorByKey[roomKey(g.rows[0])] = roomColorFor(g.rows[0]);
+  });
+  renderBackButton();
+  renderKpis();
+  renderChart();
+  const detailCard = document.getElementById("detail-card");
+  if (detailCard) detailCard.hidden = !state.room;
+  if (state.room) renderTable();
+
+  // 每间宿舍一个独立页面标题
+  const roomLabel = state.room && state.groups.length ? state.groups[0].label : "";
+  document.title = roomLabel ? `宿舍电费 · ${roomLabel}` : "宿舍电费监控";
+}
+
+function renderBackButton() {
+  const btn = document.getElementById("back-btn");
+  if (btn) btn.hidden = !state.room;
+}
+
+function renderKpis() {
+  const holder = document.getElementById("kpis");
+  if (!state.data.length) {
+    holder.innerHTML = '<div class="empty">暂无读数,先运行 python monitor.py</div>';
+    document.getElementById("room-sub").textContent = "—";
+    return;
+  }
+  if (state.groups.length === 1) renderSingleKpis(holder, state.groups[0]);
+  else renderRoomKpis(holder, state.groups);
+}
+
+function renderSingleKpis(holder, group) {
+  holder.className = "kpis";
+  const data = group.rows;
+  const last = data[data.length - 1];
+  const room = labelForRow(last);
+  document.getElementById("room-sub").textContent = room;
+
+  // 变化量(同一宿舍内相对上一次读数)
+  let deltaText = "", deltaClass = "flat";
+  if (data.length >= 2) {
+    const prev = data[data.length - 2].surplus_charge;
+    const cur = last.surplus_charge;
+    if (cur !== null && prev !== null) {
+      const d = cur - prev;
+      deltaClass = Math.abs(d) < 1e-9 ? "flat" : (d > 0 ? "up" : "down");
+      deltaText = (d > 0 ? "+" : "") + fmt(d) + " kWh";
+    }
+  }
+
+  const st = balanceStatus(last.surplus_charge);
+  const stHtml = st.level
+    ? `<div class="status ${st.level}"><span class="dot"></span>${st.text}</div>`
+    : "";
+
+  holder.innerHTML = `
+    <div class="kpi">
+      <div class="label">当前剩余电量</div>
+      <div class="value hero">${fmt(last.surplus_charge)}<span class="unit">&nbsp;kWh</span></div>
+      <div class="delta ${deltaClass}">${deltaText}</div>
+      ${stHtml}
+    </div>
+    <div class="kpi">
+      <div class="label">电表总用电量</div>
+      <div class="value">${fmt(last.total_usage)}</div>
+      <div class="delta flat">kWh</div>
+    </div>
+    <div class="kpi">
+      <div class="label">采样点数</div>
+      <div class="value">${data.length}</div>
+      <div class="delta flat">当前窗口</div>
+    </div>
+    <div class="kpi">
+      <div class="label">最近更新</div>
+      <div class="value updated">${fullTs(last.ts)}</div>
+      <div class="delta flat"></div>
+    </div>`;
+}
+
+function renderRoomKpis(holder, groups) {
+  holder.className = "kpis rooms";
+  document.getElementById("room-sub").textContent = `全部宿舍 · ${groups.length} 间`;
+  holder.innerHTML = "";
+  groups.forEach((g, i) => {
+    const last = g.rows[g.rows.length - 1];
+    let deltaText = "", deltaClass = "flat";
+    if (g.rows.length >= 2) {
+      const prev = g.rows[g.rows.length - 2].surplus_charge;
+      const cur = last.surplus_charge;
+      if (cur !== null && prev !== null) {
+        const d = cur - prev;
+        deltaClass = Math.abs(d) < 1e-9 ? "flat" : (d > 0 ? "up" : "down");
+        deltaText = (d > 0 ? "+" : "") + fmt(d) + " kWh";
+      }
+    }
+    const st = balanceStatus(last.surplus_charge);
+    const card = document.createElement("div");
+    card.className = "kpi room";
+    card.style.setProperty("--accent", roomColorFor(g.rows[0]));
+    card.title = "点击放大查看该宿舍曲线";
+    card.addEventListener("click", () => focusRoom(g));
+    card.innerHTML = `
+      <div class="label" title="${esc(g.label)}">${esc(g.label)}</div>
+      <div class="value hero">${fmt(last.surplus_charge)}<span class="unit">&nbsp;kWh</span></div>
+      <div class="delta ${deltaClass}">${deltaText}</div>
+      ${st.level ? `<div class="status ${st.level}"><span class="dot"></span>${st.text}</div>` : ""}`;
+    holder.appendChild(card);
+  });
+}
+
+function isDark() {
+  const t = document.documentElement.getAttribute("data-theme");
+  return t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+}
+function themeColors() {
+  const dark = isDark();
+  return {
+    dark,
+    text:    dark ? "#c3c2b7" : "#52514e",
+    faint:   "#898781",
+    grid:    dark ? "#2c2c2a" : "#e1e0d9",
+    axis:    dark ? "#383835" : "#c3c2b7",
+    surface: dark ? "#1a1a19" : "#fcfcfb",
+    border:  dark ? "rgba(255,255,255,0.12)" : "rgba(11,11,11,0.12)",
+  };
+}
+const hexA = (hex, a) => {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`;
+};
+function xAxisFormatter(ms, st) {
+  const d = new Date(ms);
+  const pad = n => String(n).padStart(2, "0");
+  const day = `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (day === st.last) return time;   // 同一天 → 只显示时刻,不再重复日期
+  st.last = day;                       // 跨天 → 显示日期
+  return day;
+}
+
+/* ============ ECharts:图表 ============ */
+const CHARTS = [];
+function disposeCharts() {
+  CHARTS.forEach(c => { try { if (!c.isDisposed()) c.dispose(); } catch (e) {} });
+  CHARTS.length = 0;
+}
+let resizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    CHARTS.forEach(c => { try { if (!c.isDisposed()) c.resize(); } catch (e) {} });
+  }, 120);
+});
+
+function buildChartOption(rows, color, mini) {
+  const t = themeColors();
+  const xState = { last: "" };   // 每个图表独立的跨天标签状态
+  const pts = rows.filter(r => r.surplus_charge !== null && !isNaN(r.surplus_charge))
+                  .map(r => [new Date(r.ts.replace(" ", "T")).getTime(), r.surplus_charge]);
+  // 纵轴小数位:数值跨度小还显示整数没意义,按跨度自适应(0/1/2 位)
+  const yVals = pts.map(p => p[1]);
+  const ySpan = yVals.length ? Math.max(...yVals) - Math.min(...yVals) : 0;
+  const yFrac = ySpan < 1 ? 2 : (ySpan < 5 ? 1 : 0);
+  return {
+    animation: false,
+    grid: { top: 16, right: mini ? 14 : 64, bottom: 24, left: mini ? 42 : 56 },
+    tooltip: {
+      trigger: "axis", confine: true,
+      backgroundColor: t.surface, borderColor: t.border, borderWidth: 1,
+      textStyle: { color: t.text, fontSize: 12 },
+      formatter: params => {
+        const p = params && params[0];
+        if (!p) return "";
+        const raw = p.value;
+        const ms = Array.isArray(raw) ? raw[0] : p.axisValue;
+        const v = Array.isArray(raw) ? raw[1] : raw;
+        const d = new Date(ms);
+        const pad = n => String(n).padStart(2, "0");
+        const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        return `<span style="color:${color}">●</span> ${date}<br>剩余电量 <b>${fmt(v)} kWh</b>`;
+      },
+    },
+    xAxis: {
+      type: "time",
+      axisLine: { lineStyle: { color: t.axis } },
+      axisTick: { show: false },
+      axisLabel: { color: t.faint, fontSize: 11, hideOverlap: true,
+                   formatter: ms => xAxisFormatter(ms, xState) },
+      splitLine: { show: false },
+    },
+    yAxis: {
+      type: "value", scale: true,
+      axisLabel: {
+        color: t.faint, fontSize: 11,
+        formatter: v => v.toLocaleString("zh-CN",
+          { minimumFractionDigits: yFrac, maximumFractionDigits: yFrac }),
+      },
+      splitLine: { lineStyle: { color: t.grid } },
+    },
+    series: [{
+      type: "line",
+      data: pts,
+      smooth: true,
+      showSymbol: pts.length <= 40,
+      symbol: "circle",
+      symbolSize: mini ? 3 : 5,
+      lineStyle: { width: 2, color },
+      itemStyle: { color },
+      areaStyle: {
+        color: { type: "linear", x: 0, y: 0, x2: 0, y2: 1,
+                 colorStops: [{ offset: 0, color: hexA(color, 0.20) },
+                              { offset: 1, color: hexA(color, 0.02) }] },
+      },
+      ...(mini ? {} : {
+        endLabel: {
+          show: true, color, fontSize: 12, fontWeight: 600,
+          formatter: p => fmt(p.value[1]) + " kWh",
+        },
+      }),
+    }],
+  };
+}
+
+function renderChart() {
+  const holder = document.getElementById("chart-holder");
+  const hint = document.getElementById("chart-hint");
+  disposeCharts();
+  holder.textContent = "";
+  if (typeof echarts === "undefined") {
+    hint.textContent = "—";
+    const div = document.createElement("div");
+    div.className = "empty";
+    div.textContent = "图表库加载失败";
+    holder.appendChild(div);
+    return;
+  }
+  if (!state.data.length) {
+    hint.textContent = "—";
+    const div = document.createElement("div");
+    div.className = "empty";
+    div.textContent = "暂无数据";
+    holder.appendChild(div);
+    return;
+  }
+  const groups = state.groups.filter(g =>
+    g.rows.some(r => r.surplus_charge !== null && !isNaN(r.surplus_charge)));
+  if (!groups.length) {
+    hint.textContent = "—";
+    const div = document.createElement("div");
+    div.className = "empty";
+    div.textContent = "暂无有效数据";
+    holder.appendChild(div);
+    return;
+  }
+  if (groups.length === 1) {
+    hint.textContent = "剩余电量曲线(kWh)";
+    const el = document.createElement("div");
+    el.className = "chart-main";
+    holder.appendChild(el);
+    const ch = echarts.init(el);
+    ch.setOption(buildChartOption(groups[0].rows, roomColorFor(groups[0].rows[0]), false));
+    CHARTS.push(ch);
+  } else {
+    hint.textContent = "每间宿舍单独一张图 · 点击卡片放大";
+    const grid = document.createElement("div");
+    grid.className = "mini-grid";
+    const subs = [];
+    groups.forEach((g, i) => {
+      const box = document.createElement("div");
+      box.className = "mini-card";
+      box.title = "点击放大查看该宿舍曲线";
+      box.addEventListener("click", () => focusRoom(g));
+      const hd = document.createElement("div");
+      hd.className = "mini-hd";
+      const dot = document.createElement("span");
+      dot.className = "mini-dot";
+      dot.style.background = roomColorFor(g.rows[0]);
+      const nm = document.createElement("span");
+      nm.className = "mini-name";
+      nm.title = g.label;
+      nm.textContent = g.label;
+      const last = g.rows[g.rows.length - 1];
+      const val = document.createElement("span");
+      val.className = "mini-val";
+      val.textContent = fmt(last.surplus_charge) + " kWh";
+      hd.append(dot, nm, val);
+      const sub = document.createElement("div");
+      sub.className = "chart-holder sub";
+      box.append(hd, sub);
+      grid.appendChild(box);
+      subs.push({ sub, rows: g.rows, color: roomColorFor(g.rows[0]) });
+    });
+    holder.appendChild(grid);
+    // 先挂到文档再初始化 ECharts,否则容器尺寸为 0,canvas 画不出来
+    subs.forEach(({ sub, rows, color }) => {
+      const ch = echarts.init(sub);
+      ch.setOption(buildChartOption(rows, color, true));
+      CHARTS.push(ch);
+    });
+  }
+}
+
+function renderTable() {
+  const data = state.data;
+  const wrap = document.getElementById("table-wrap");
+  const hint = document.getElementById("table-hint");
+  const multi = state.groups.length > 1;
+  hint.textContent = data.length ? `${data.length} 条` : "—";
+  if (!data.length) {
+    wrap.innerHTML = '<div class="empty">暂无读数</div>';
+    return;
+  }
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const hr = document.createElement("tr");
+  const headers = multi
+    ? ["宿舍", "时间", "剩余电量(kWh)", "总用电量(kWh)", "明细"]
+    : ["时间", "剩余电量(kWh)", "总用电量(kWh)", "明细"];
+  headers.forEach(h => {
+    const th = document.createElement("th");
+    if (h.endsWith("(kWh)")) th.style.textAlign = "right";
+    th.textContent = h;
+    hr.appendChild(th);
+  });
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (let i = data.length - 1; i >= 0; i--) {
+    const d = data[i];
+    const tr = document.createElement("tr");
+    if (multi) {
+      const tdR = document.createElement("td");
+      tdR.className = "col-room";
+      const dot = document.createElement("span");
+      dot.className = "room-dot";
+      dot.style.background = state.colorByKey[roomKey(d)] || "var(--ink-3)";
+      tdR.appendChild(dot);
+      tdR.appendChild(document.createTextNode(labelForRow(d)));
+      tr.appendChild(tdR);
+    }
+    const tdT = document.createElement("td"); tdT.textContent = fullTs(d.ts);
+    const tdS = document.createElement("td");
+    const v = d.surplus_charge;
+    tdS.className = "num";
+    tdS.textContent = fmt(v);
+    if (v !== null && v < 0) tdS.classList.add("neg");
+    const tdU = document.createElement("td");
+    tdU.className = "num";
+    tdU.textContent = fmt(d.total_usage);
+    const tdD = document.createElement("td");
+    tdD.textContent = Object.entries(d.show || {})
+      .map(([k, v2]) => `${k}=${v2}`).join("  ") || "—";
+    tr.append(tdT, tdS, tdU, tdD);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  wrap.replaceChildren(table);
+}
+
+/* ============ 筛选 ============ */
+function initFilters() {
+  document.querySelectorAll("#filters button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("#filters button").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      state.days = parseInt(btn.dataset.days, 10);
+      refresh();
+    });
+  });
+}
+
+/* ============ 宿舍选择(切数据) ============ */
+function matchRoom(a, b) {
+  return !!(a && b && a.campus === b.campus && a.building === b.building && a.room === b.room);
+}
+
+function focusRoom(g) {
+  const r = g.rows[0];
+  navigate({ campus: r.campus, building: r.building, room: r.room });
+}
+
+function initBackButton() {
+  document.getElementById("back-btn").addEventListener("click", () => {
+    if (!state.room) return;
+    navigate(null);   // 返回全部宿舍全览
+  });
+}
+
+/* ============ 查询设置 ============ */
+let draftTargets = [];
+let pickCampus = null, pickBuilding = null, pickRoom = null;
+
+function fillSelect(el, items, placeholder, disabled) {
+  el.textContent = "";
+  const ph = document.createElement("option");
+  ph.value = ""; ph.textContent = placeholder;
+  el.appendChild(ph);
+  (items || []).forEach(it => {
+    const o = document.createElement("option");
+    o.value = it.value;
+    o.dataset.name = it.name;
+    o.textContent = it.name;
+    el.appendChild(o);
+  });
+  el.disabled = !!disabled;
+}
+
+async function loadCampuses() {
+  const d = await (await fetch("/api/campuses")).json();
+  if (d.error) throw new Error(d.error);
+  fillSelect(document.getElementById("pick-campus"), d, "— 选择校区 —", false);
+}
+
+async function loadBuildings(campus) {
+  const d = await (await fetch(`/api/buildings?campus=${encodeURIComponent(campus)}`)).json();
+  if (d.error) throw new Error(d.error);
+  fillSelect(document.getElementById("pick-building"), d, "— 选择楼栋 —", false);
+}
+
+async function loadRooms(campus, building) {
+  const d = await (await fetch(
+    `/api/rooms?campus=${encodeURIComponent(campus)}&building=${encodeURIComponent(building)}`
+  )).json();
+  if (d.error) throw new Error(d.error);
+  fillSelect(document.getElementById("pick-room"), d, "— 选择房间 —", false);
+}
+
+function resetPicker() {
+  pickCampus = pickBuilding = pickRoom = null;
+  fillSelect(document.getElementById("pick-campus"), [], "— 选择校区 —", false);
+  fillSelect(document.getElementById("pick-building"), [], "— 选择楼栋 —", true);
+  fillSelect(document.getElementById("pick-room"), [], "— 选择房间 —", true);
+  document.getElementById("pick-add").disabled = true;
+  document.getElementById("pick-preview").textContent = "";
+  document.getElementById("pick-tag").value = "";
+  loadCampuses().catch(e => {
+    document.getElementById("pick-preview").textContent = "加载校区失败: " + e.message;
+  });
+}
+
+function updatePreview() {
+  const preview = document.getElementById("pick-preview");
+  const addBtn = document.getElementById("pick-add");
+  if (pickCampus && pickBuilding && pickRoom) {
+    preview.textContent = `将添加: ${pickCampus.name}/${pickBuilding.name}/${pickRoom.name}`;
+    addBtn.disabled = false;
+  } else {
+    preview.textContent = "";
+    addBtn.disabled = true;
+  }
+}
+
+function renderTargetList() {
+  const wrap = document.getElementById("target-list");
+  wrap.textContent = "";
+  if (!draftTargets.length) {
+    const div = document.createElement("div");
+    div.className = "empty-hint";
+    div.textContent = "还没有监控宿舍,在下面添加。";
+    wrap.appendChild(div);
+    return;
+  }
+  draftTargets.forEach((t, i) => {
+    const item = document.createElement("div");
+    item.className = "target-item";
+    const name = document.createElement("span");
+    name.className = "tl-name";
+    name.textContent = targetLabel(t);
+    const id = document.createElement("span");
+    id.className = "tl-id";
+    id.textContent = `${t.campus}/${t.building}/${t.room}`;
+    item.append(name, id);
+    wrap.appendChild(item);
+  });
+}
+
+function initSettings() {
+  const modal = document.getElementById("settings-modal");
+  document.getElementById("settings-btn").addEventListener("click", () => {
+    draftTargets = state.targets.map(t => ({ ...t }));
+    renderTargetList();
+    resetPicker();
+    modal.hidden = false;
+  });
+  document.getElementById("modal-close").addEventListener("click", () => { modal.hidden = true; });
+  modal.addEventListener("click", e => { if (e.target === modal) modal.hidden = true; });
+
+  const selC = document.getElementById("pick-campus");
+  const selB = document.getElementById("pick-building");
+  const selR = document.getElementById("pick-room");
+
+  selC.addEventListener("change", async e => {
+    const opt = e.target.selectedOptions[0];
+    pickCampus = opt.value ? { value: opt.value, name: opt.dataset.name } : null;
+    pickBuilding = pickRoom = null;
+    if (pickCampus) {
+      try { await loadBuildings(pickCampus.value); } catch (err) {
+        document.getElementById("pick-preview").textContent = "加载楼栋失败: " + err.message;
+      }
+    } else {
+      fillSelect(selB, [], "— 选择楼栋 —", true);
+      fillSelect(selR, [], "— 选择房间 —", true);
+    }
+    updatePreview();
+  });
+  selB.addEventListener("change", async e => {
+    const opt = e.target.selectedOptions[0];
+    pickBuilding = opt.value ? { value: opt.value, name: opt.dataset.name } : null;
+    pickRoom = null;
+    if (pickBuilding) {
+      try { await loadRooms(pickCampus.value, pickBuilding.value); } catch (err) {
+        document.getElementById("pick-preview").textContent = "加载房间失败: " + err.message;
+      }
+    } else {
+      fillSelect(selR, [], "— 选择房间 —", true);
+    }
+    updatePreview();
+  });
+  selR.addEventListener("change", e => {
+    const opt = e.target.selectedOptions[0];
+    pickRoom = opt.value ? { value: opt.value, name: opt.dataset.name } : null;
+    document.getElementById("pick-tag").value = pickRoom ? pickRoom.name : "";
+    updatePreview();
+  });
+
+  document.getElementById("pick-add").addEventListener("click", async () => {
+    if (!(pickCampus && pickBuilding && pickRoom)) return;
+    const t = {
+      feeitemid: 409, appId: 34,
+      campus: pickCampus.value, building: pickBuilding.value, room: pickRoom.value,
+      label: document.getElementById("pick-tag").value.trim() || `${pickCampus.name}/${pickBuilding.name}/${pickRoom.name}`,
+    };
+    if (draftTargets.some(x => matchRoom(x, t))) {
+      document.getElementById("pick-preview").textContent = "该宿舍已在列表中,将更新 tag";
+    }
+    const addBtn = document.getElementById("pick-add");
+    addBtn.disabled = true;
+    try {
+      const res = await fetch("/api/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target: t }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+      state.targets = body.targets || [];
+      draftTargets = state.targets.map(x => ({ ...x }));
+      renderTargetList();
+      document.getElementById("pick-preview").textContent = "已自动保存";
+      refresh();
+    } catch (e) {
+      document.getElementById("pick-preview").textContent = "保存失败: " + e.message;
+    } finally {
+      fillSelect(selB, [], "— 选择楼栋 —", true);
+      fillSelect(selR, [], "— 选择房间 —", true);
+      pickBuilding = pickRoom = null;
+      document.getElementById("pick-tag").value = "";
+      updatePreview();
+    }
+  });
+}
+
+/* ============ 立即采集 ============ */
+function toast(msg, isErr) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.toggle("err", !!isErr);
+  t.classList.add("show");
+  clearTimeout(t._t);
+  t._t = setTimeout(() => t.classList.remove("show"), 3200);
+}
+
+/* 立即采集只能作用于"当前配置里的监控目标"。state.room 是钻取时从数据行构造的,
+   可能命中 config 之外的宿舍(历史/已移除/IDs 已变)——不把必失败的请求发给后端,
+   直接提示。返回要采集的 config target,无则 null(已 toast)。 */
+function collectTarget() {
+  if (state.room) {
+    const matched = state.targets.find(x => matchRoom(x, state.room));
+    if (matched) return matched;
+    toast("该宿舍不在监控列表中,无法立即采集。可在「查询设置」里添加", true);
+    return null;
+  }
+  if (!state.targets.length) {
+    toast("还没有监控宿舍,先到「查询设置」添加", true);
+    return null;
+  }
+  return state.targets[0];
+}
+
+function collectAllProgress(d) {
+  const btn = document.getElementById("collect-btn");
+  const total = d.requested || 0;
+  const done = d.completed || 0;
+  const pct = Math.max(0, Math.min(100, Number(d.percent ?? (total ? done * 100 / total : 0))));
+  btn.style.setProperty("--progress", `${pct}%`);
+  btn.classList.add("busy");
+  btn.textContent = total ? `采集 ${done}/${total}` : "准备采集…";
+  if (d.current && d.current.label) btn.title = `正在采集: ${d.current.label}`;
+}
+
+function resetCollectButton(btn, text) {
+  btn.disabled = false;
+  btn.classList.remove("busy");
+  btn.style.setProperty("--progress", "0%");
+  btn.textContent = text;
+  btn.removeAttribute("title");
+}
+
+async function pollCollectAll(jobId, btn, oldText) {
+  while (true) {
+    const res = await fetch(`/api/collect-all/status?job_id=${encodeURIComponent(jobId)}`, { cache: "no-store" });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
+    collectAllProgress(d);
+    if (d.state === "done" || d.state === "failed") return d;
+    await new Promise(resolve => setTimeout(resolve, 800));
+  }
+}
+
+async function collectAllWithProgress(btn, oldText) {
+  const start = await fetch("/api/collect-all", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+  });
+  const job = await start.json().catch(() => ({}));
+  if (!start.ok) throw new Error(job.error || `HTTP ${start.status}`);
+  const result = await pollCollectAll(job.job_id, btn, oldText);
+  const failed = result.failed || (result.results || []).filter(r => r.error).length;
+  const skipped = result.skipped || 0;
+  const all = result.state === "done" && !failed && !skipped && result.success === result.requested;
+  const parts = [`成功 ${result.success || 0}/${result.requested || 0}`];
+  if (failed) parts.push(`${failed} 间失败`);
+  if (skipped) parts.push(`${skipped} 间跳过(限流)`);
+  toast(all ? `已采集全部 ${result.success} 间` : "采集结果: " + parts.join(","), !all);
+  await refresh();
+}
+
+function collectNow() {
+  const btn = document.getElementById("collect-btn");
+  const old = "⚡ 立即采集";
+  btn.disabled = true;
+  btn.classList.add("busy");
+  btn.style.setProperty("--progress", "0%");
+  if (!state.room) {
+    if (!state.targets.length) {
+      resetCollectButton(btn, old);
+      toast("还没有监控宿舍,先到「查询设置」添加", true);
+      return;
+    }
+    collectAllWithProgress(btn, old)
+      .catch(e => toast("采集失败: " + e.message, true))
+      .finally(() => resetCollectButton(btn, old));
+    return;
+  }
+  const t = collectTarget();
+  if (!t) { resetCollectButton(btn, old); return; }
+  btn.textContent = "采集中…";
+  fetch("/api/collect", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ campus: t.campus, building: t.building, room: t.room }),
+  })
+    .then(r => r.json().catch(() => ({ error: `HTTP ${r.status}` })))
+    .then(d => {
+      if (d && d.ok) toast(`已采集 ${d.display_label || d.room_label}:剩余 ${fmt(d.surplus_charge)} kWh`);
+      else toast("采集失败:" + ((d && d.error) || "未知错误"), true);
+      refresh();
+    })
+    .catch(e => toast("采集失败:" + e.message, true))
+    .finally(() => resetCollectButton(btn, old));
+}
+
+/* ============ 启动 ============ */
+async function boot() {
+  // 先尝试从缓存加载上次数据（离线可用）
+  if ('caches' in window) {
+    try {
+      const cache = await caches.open('elec-monitor-v1');
+      const cachedConfig = await cache.match('/api/config');
+      if (cachedConfig) {
+        const cfg = await cachedConfig.json();
+        if (cfg && cfg.targets) state.targets = cfg.targets;
+      }
+      const cachedReadings = await cache.match('/api/readings');
+      if (cachedReadings) {
+        const data = await cachedReadings.json();
+        if (data && data.length) {
+          state.data = data;
+          state.room = roomFromPath();
+          render();
+        }
+      }
+    } catch (e) { console.warn('缓存加载失败:', e); }
+  }
+
+  // 再通过网络获取最新数据
+  try {
+    const cfg = await (await fetch('/api/config')).json();
+    if (cfg.error) throw new Error(cfg.error);
+    state.targets = cfg.targets || [];
+    state.room = roomFromPath();
+    await refresh();
+  } catch (e) {
+    console.warn('网络加载失败,使用缓存数据:', e);
+  }
+
+  // 连接 SSE 实时推送
+  connectSSE();
+}
+initTheme();
+initFilters();
+initBackButton();
+initSettings();
+document.getElementById("collect-btn").addEventListener("click", collectNow);
+boot();   // 含 SSE 连接 + 缓存优先加载
+</script>
+</body>
+</html>

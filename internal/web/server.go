@@ -617,58 +617,21 @@ func (s *Server) handlePushToken(w http.ResponseWriter, r *http.Request) {
 // ---- 静态文件 ----
 
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
-	rel := strings.TrimPrefix(r.URL.Path, "/static/")
-	rel = strings.TrimLeft(rel, "/")
-
-	// 路径穿越防护
-	root, _ := filepath.Abs(filepath.Join(s.rootDir, "static"))
-	fullPath, _ := filepath.Abs(filepath.Join(root, rel))
-	if !strings.HasPrefix(fullPath, root) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-		return
-	}
-
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-		return
-	}
-
-	// 扩展名白名单
-	ext := strings.TrimPrefix(filepath.Ext(fullPath), ".")
-	contentTypes := map[string]string{
-		"js":    "application/javascript; charset=utf-8",
-		"css":   "text/css; charset=utf-8",
-		"json":  "application/json; charset=utf-8",
-		"svg":   "image/svg+xml",
-		"png":   "image/png",
-		"woff2": "font/woff2",
-		"html":  "text/html; charset=utf-8",
-		"ico":   "image/x-icon",
-	}
-	ctype, ok := contentTypes[ext]
-	if !ok {
-		ctype = "application/octet-stream"
-	}
-
-	data, err := os.ReadFile(fullPath)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-		return
-	}
-
-	w.Header().Set("Content-Type", ctype)
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
-	w.Header().Set("Cache-Control", "public, max-age=3600")
-	w.Write(data)
+	// 从嵌入的文件系统提供静态文件
+	s.embeddedFileServer().ServeHTTP(w, r)
 }
 
 func (s *Server) serveFile(filename, ctype string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		fullPath := filepath.Join(s.rootDir, filename)
-		data, err := os.ReadFile(fullPath)
+		data, err := readEmbeddedFile(filename)
 		if err != nil {
-			s.handle404(w, r)
-			return
+			// 回退到磁盘读取
+			fullPath := filepath.Join(s.rootDir, filename)
+			data, err = os.ReadFile(fullPath)
+			if err != nil {
+				s.handle404(w, r)
+				return
+			}
 		}
 		w.Header().Set("Content-Type", ctype)
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
@@ -677,11 +640,15 @@ func (s *Server) serveFile(filename, ctype string) http.HandlerFunc {
 }
 
 func (s *Server) serveHTML(w http.ResponseWriter, filename string) {
-	fullPath := filepath.Join(s.rootDir, filename)
-	data, err := os.ReadFile(fullPath)
+	data, err := readEmbeddedFile(filename)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-		return
+		// 回退到磁盘读取
+		fullPath := filepath.Join(s.rootDir, filename)
+		data, err = os.ReadFile(fullPath)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
