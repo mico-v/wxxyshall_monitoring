@@ -319,7 +319,6 @@ if ('serviceWorker' in navigator) {
     .kpis.rooms { grid-template-columns: 1fr; }
   }
 </style>
-<link rel="stylesheet" href="/static/uplot.min.css">
 </head>
 <body>
 <div class="wrap">
@@ -401,7 +400,7 @@ if ('serviceWorker' in navigator) {
   </div>
 </div>
 
-<script src="/static/uplot.min.js"></script>
+<script src="/static/echarts.min.js"></script>
 <script>
 "use strict";
 
@@ -718,173 +717,118 @@ function renderRoomKpis(holder, groups) {
   });
 }
 
-/* ============ uPlot 时序曲线 ============ */
-class ChartHandle {
-  destroy() {
-    if (this.ro) { this.ro.disconnect(); this.ro = null; }
-    if (this._tip) { this._tip.remove(); this._tip = null; }
-    if (this.u) { try { this.u.destroy(); } catch (e) {} this.u = null; }
-  }
-  resize() {
-    if (!this.u) return;
-    const w = this.el.clientWidth || 0;
-    const h = this.mini ? 150 : 320;
-    if (w > 40 && h > 40) this.u.setSize({ width: w, height: h });
-  }
+/* ============ ECharts:图表 ============ */
+function isDark() {
+  const t = document.documentElement.getAttribute("data-theme");
+  return t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+}
+function themeColors() {
+  const dark = isDark();
+  return {
+    dark,
+    text:    dark ? "#c3c2b7" : "#52514e",
+    faint:   "#898781",
+    grid:    dark ? "#2c2c2a" : "#e1e0d9",
+    axis:    dark ? "#383835" : "#c3c2b7",
+    surface: dark ? "#1a1a19" : "#fcfcfb",
+    border:  dark ? "rgba(255,255,255,0.12)" : "rgba(11,11,11,0.12)",
+  };
+}
+const hexA = (hex, a) => {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`;
+};
+function xAxisFormatter(ms, st) {
+  const d = new Date(ms);
+  const pad = n => String(n).padStart(2, "0");
+  const day = `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (day === st.last) return time;   // 同一天只显示时刻,跨天显示日期
+  st.last = day;
+  return day;
 }
 
 const CHARTS = [];
 function disposeCharts() {
-  CHARTS.forEach(c => { try { c.destroy(); } catch (e) {} });
+  CHARTS.forEach(c => { try { if (!c.isDisposed()) c.dispose(); } catch (e) {} });
   CHARTS.length = 0;
 }
-
-function makeChart(el, pts, color, mini) {
-  const handle = new ChartHandle();
-  handle.el = el;
-  handle.mini = !!mini;
-  if (!pts.length) return handle;          // 空数据:占位
-
-  const xs = pts.map(p => p[0] / 1000), ys = pts.map(p => p[1]);
-  const dark = (document.documentElement.getAttribute("data-theme") === "dark")
-    || (!document.documentElement.getAttribute("data-theme")
-        && matchMedia("(prefers-color-scheme: dark)").matches);
-  const col = {
-    grid: dark ? "#2c2c2a" : "#ecebdf",
-    axis: dark ? "#3b3b38" : "#d6d5c8",
-  };
-  const height = mini ? 150 : 320;
-  const width = el.clientWidth || (mini ? 320 : 520);
-  const fmtV = v => Number(v).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-  // 悬停 tooltip(仅主图)
-  let tip = null;
-  const mkTip = () => {
-    if (tip) return tip;
-    tip = document.createElement("div");
-    tip.style.cssText = "position:fixed;pointer-events:none;z-index:60;font-size:12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 10px;box-shadow:0 4px 12px rgba(0,0,0,0.15);white-space:nowrap;";
-    document.body.appendChild(tip);
-    return tip;
-  };
-  const showTip = (x, y, html) => {
-    const t = mkTip();
-    t.innerHTML = html;
-    t.style.display = "block";
-    const tw = t.offsetWidth, th = t.offsetHeight;
-    let l = x + 12, tp = y - th - 12;
-    if (l + tw > window.innerWidth - 10) l = x - tw - 12;
-    if (tp < 10) tp = y + 12;
-    t.style.left = l + "px"; t.style.top = tp + "px";
-  };
-  const hideTip = () => { if (tip) tip.style.display = "none"; };
-
-  const single = xs.length === 1;
-  const opts = {
-    width, height,
-    padding: [14, mini ? 4 : 10, 4, mini ? 4 : 54],
-    legend: { show: false },
-    cursor: mini ? { show: false } : { x: true, y: false },
-    series: [
-      {},
-      {
-        label: "剩余电量",
-        stroke: color,
-        width: 2,
-        fill: mini ? false : self => {
-          const g = self.ctx.createLinearGradient(0, 0, 0, self.height);
-          g.addColorStop(0, color + "35");
-          g.addColorStop(1, color + "05");
-          return g;
-        },
-        points: { show: xs.length <= 40, size: mini ? 3 : 5, stroke: color, fill: color },
-        paths: uPlot.paths.spline,
-        value: (self, raw) => (raw == null ? "—" : fmtV(raw) + " kWh"),
-      },
-    ],
-    axes: [
-      {
-        stroke: col.axis, grid: { stroke: col.grid, width: 1 }, ticks: { stroke: col.axis },
-        font: "11px system-ui,sans-serif", size: 28,
-        values: (u, ticks) => ticks.map(t => {
-          const d = new Date(t * 1000);
-          const p = n => String(n).padStart(2, "0");
-          return p(d.getMonth() + 1) + "-" + p(d.getDate());
-        }),
-      },
-      {
-        stroke: col.axis, grid: { show: false }, ticks: { show: false },
-        font: "11px system-ui,sans-serif", size: mini ? 8 : 10, show: !mini,
-        values: (u, ticks) => ticks.map(t => Number(t).toLocaleString("zh-CN", { maximumFractionDigits: 1 })),
-      },
-    ],
-    scales: single
-      ? { x: { time: true, min: xs[0] - 3600, max: xs[0] + 3600 }, y: { auto: true } }
-      : { x: { time: true }, y: { auto: true } },
-    hooks: {
-      draw: [u => {
-        if (mini || !xs.length) return;
-        const idx = xs.length - 1;
-        const px = u.valToPos(xs[idx], "x"), py = u.valToPos(ys[idx], "y");
-        u.ctx.save();
-        u.ctx.font = "600 12px system-ui,sans-serif";
-        u.ctx.textAlign = "left";
-        u.ctx.fillStyle = color;
-        u.ctx.fillText(fmtV(ys[idx]) + " kWh", Math.min(px + 6, u.width - 110), py - 8);
-        u.ctx.restore();
-      }],
-    },
-  };
-
-  const u = new uPlot(opts, [xs, ys], el);
-  handle.u = u;
-
-  if (!mini) {
-    const over = u.over;
-    over.style.cursor = "crosshair";
-    const nearest = left => {
-      const v = u.posToVal(left, "x");
-      let lo = 0, hi = xs.length - 1;
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        if (xs[mid] < v) lo = mid + 1; else hi = mid;
-      }
-      if (lo > 0 && Math.abs(xs[lo - 1] - v) < Math.abs(xs[lo] - v)) lo--;
-      return lo;
-    };
-    const tipHtml = idx => {
-      const d = new Date(xs[idx] * 1000);
-      const p = n => String(n).padStart(2, "0");
-      const date = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-      return `<span style="color:${color}">●</span> ${date}<br>剩余电量 <b>${fmtV(ys[idx])} kWh</b>`;
-    };
-    over.addEventListener("mousemove", e => {
-      const idx = nearest(e.offsetX);
-      if (idx < 0 || idx >= xs.length) { hideTip(); return; }
-      showTip(e.offsetX, e.offsetY, tipHtml(idx));
-    });
-    over.addEventListener("mouseleave", hideTip);
-    over.addEventListener("touchstart", e => {
-      const t = e.touches[0];
-      const r = over.getBoundingClientRect();
-      const idx = nearest(t.clientX - r.left);
-      if (idx >= 0 && idx < xs.length) showTip(t.clientX - r.left, t.clientY - r.top, tipHtml(idx));
-    }, { passive: true });
-  }
-
-  // 自适应尺寸(容器尺寸由 CSS 决定)
-  if (typeof ResizeObserver !== "undefined") {
-    handle.ro = new ResizeObserver(() => handle.resize());
-    handle.ro.observe(el);
-  }
-  return handle;
-}
 let resizeTimer = null;
-window.addEventListener('resize', () => {
+window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
-    CHARTS.forEach(c => { try { c.resize(); } catch (e) {} });
+    CHARTS.forEach(c => { try { if (!c.isDisposed()) c.resize(); } catch (e) {} });
   }, 120);
 });
+
+function buildChartOption(rows, color, mini) {
+  const t = themeColors();
+  const xState = { last: "" };   // 每个图表独立的跨天标签状态
+  const pts = rows.filter(r => r.surplus_charge !== null && !isNaN(r.surplus_charge))
+                  .map(r => [new Date(r.ts.replace(" ", "T")).getTime(), r.surplus_charge]);
+  // 纵轴小数位:数值跨度小还显示整数没意义,按跨度自适应(0/1/2 位)
+  const yVals = pts.map(p => p[1]);
+  const ySpan = yVals.length ? Math.max(...yVals) - Math.min(...yVals) : 0;
+  const yFrac = ySpan < 1 ? 2 : (ySpan < 5 ? 1 : 0);
+  return {
+    animation: false,
+    grid: { top: 16, right: mini ? 14 : 64, bottom: 24, left: mini ? 42 : 56 },
+    tooltip: {
+      trigger: "axis", confine: true,
+      backgroundColor: t.surface, borderColor: t.border, borderWidth: 1,
+      textStyle: { color: t.text, fontSize: 12 },
+      formatter: params => {
+        const p = params && params[0];
+        if (!p) return "";
+        const raw = p.value;
+        const ms = Array.isArray(raw) ? raw[0] : p.axisValue;
+        const v = Array.isArray(raw) ? raw[1] : raw;
+        const d = new Date(ms);
+        const pad = n => String(n).padStart(2, "0");
+        const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        return `<span style="color:${color}">●</span> ${date}<br>剩余电量 <b>${fmt(v)} kWh</b>`;
+      },
+    },
+    xAxis: {
+      type: "time",
+      axisLine: { lineStyle: { color: t.axis } },
+      axisTick: { show: false },
+      axisLabel: { color: t.faint, fontSize: 11, hideOverlap: true,
+                   formatter: ms => xAxisFormatter(ms, xState) },
+      splitLine: { show: false },
+    },
+    yAxis: {
+      type: "value", scale: true,
+      axisLabel: {
+        color: t.faint, fontSize: 11,
+        formatter: v => v.toLocaleString("zh-CN",
+          { minimumFractionDigits: yFrac, maximumFractionDigits: yFrac }),
+      },
+      splitLine: { lineStyle: { color: t.grid } },
+    },
+    series: [{
+      type: "line",
+      data: pts,
+      smooth: true,
+      showSymbol: pts.length <= 40,
+      symbol: "circle",
+      symbolSize: mini ? 3 : 5,
+      lineStyle: { width: 2, color },
+      itemStyle: { color },
+      areaStyle: {
+        color: { type: "linear", x: 0, y: 0, x2: 0, y2: 1,
+                 colorStops: [{ offset: 0, color: hexA(color, 0.20) },
+                              { offset: 1, color: hexA(color, 0.02) }] },
+      },
+      ...(mini ? {} : {
+        endLabel: {
+          show: true, color, fontSize: 12, fontWeight: 600,
+          formatter: p => fmt(p.value[1]) + " kWh",
+        },
+      }),
+    }],
+  };
+}
 
 function renderChart() {
   const holder = document.getElementById('chart-holder');
@@ -905,17 +849,25 @@ function renderChart() {
     div.className = 'empty'; div.textContent = '暂无有效数据'; holder.appendChild(div);
     return;
   }
+  if (typeof echarts === "undefined") {
+    hint.textContent = "—";
+    const div = document.createElement("div");
+    div.className = "empty"; div.textContent = "图表库加载失败";
+    holder.appendChild(div);
+    return;
+  }
   if (groups.length === 1) {
     hint.textContent = '剩余电量曲线(kWh)';
     const el = document.createElement('div');
     el.className = 'chart-main'; holder.appendChild(el);
-    const pts = groups[0].rows.filter(r => r.surplus_charge !== null && !isNaN(r.surplus_charge))
-      .map(r => [new Date(r.ts.replace(' ', 'T')).getTime(), r.surplus_charge]);
-    CHARTS.push(makeChart(el, pts, roomColorFor(groups[0].rows[0]), false));
+    const ch = echarts.init(el);
+    ch.setOption(buildChartOption(groups[0].rows, roomColorFor(groups[0].rows[0]), false));
+    CHARTS.push(ch);
   } else {
     hint.textContent = '每间宿舍单独一张图 · 点击卡片放大';
     const grid = document.createElement('div');
     grid.className = 'mini-grid';
+    const subs = [];
     groups.forEach((g, i) => {
       const box = document.createElement('div');
       box.className = 'mini-card';
@@ -935,11 +887,15 @@ function renderChart() {
       sub.className = 'chart-holder sub';
       box.append(hd, sub);
       grid.appendChild(box);
-      const pts = g.rows.filter(r => r.surplus_charge !== null && !isNaN(r.surplus_charge))
-        .map(r => [new Date(r.ts.replace(' ', 'T')).getTime(), r.surplus_charge]);
-      CHARTS.push(makeChart(sub, pts, roomColorFor(g.rows[0]), true));
+      subs.push({ sub, rows: g.rows, color: roomColorFor(g.rows[0]) });
     });
     holder.appendChild(grid);
+    // 先挂到文档再初始化 ECharts,否则容器尺寸为 0,canvas 画不出来
+    subs.forEach(({ sub, rows, color }) => {
+      const ch = echarts.init(sub);
+      ch.setOption(buildChartOption(rows, color, true));
+      CHARTS.push(ch);
+    });
   }
 }
 
