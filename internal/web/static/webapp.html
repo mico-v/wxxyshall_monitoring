@@ -769,7 +769,7 @@ class TinyChart {
     };
   }
   _draw() {
-    const { ctx } = this, W = this._W, H = this._H, data = this._data, color = this._color;
+    const ctx = this._ctx, W = this._W, H = this._H, data = this._data, color = this._color;
     ctx.clearRect(0, 0, W, H);
     if (!data.length) return;
     const { faint, grid, axis, text } = this._theme();
