@@ -81,7 +81,7 @@ download_release() {
   log "二进制文件已安装到 ${INSTALL_DIR}"
 }
 
-# ---- 创建数据目录 ----
+# ---- 创建数据目录和 ADMIN_KEY ----
 setup_data_dir() {
   mkdir -p "${DATA_DIR}"
 
@@ -90,6 +90,24 @@ setup_data_dir() {
     cp "${INSTALL_DIR}/config.example.json" "${DATA_DIR}/config.json"
     warn "默认配置文件已创建: ${DATA_DIR}/config.json"
     warn "请编辑该文件填写学号，或通过网页「查询设置」添加宿舍"
+  fi
+
+  # 生成 ADMIN_KEY（持久化到 .admin_key，重启不变）
+  KEY_FILE="${DATA_DIR}/.admin_key"
+  if [ ! -s "$KEY_FILE" ]; then
+    ADMIN_KEY="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    printf '%s\n' "$ADMIN_KEY" > "$KEY_FILE"
+    chmod 600 "$KEY_FILE"
+  else
+    ADMIN_KEY="$(cat "$KEY_FILE")"
+  fi
+  export ADMIN_KEY
+
+  # 把 ADMIN_KEY 写入 config.json 的 environment 字段
+  # 如果 config.json 还没有 admin_key 字段，追加
+  if ! grep -q '"admin_key"' "${DATA_DIR}/config.json" 2>/dev/null; then
+    # 在 config.json 的 username 行后插入 admin_key
+    sed -i "s/\"username\":.*/\"admin_key\": \"${ADMIN_KEY}\",\n  \0/" "${DATA_DIR}/config.json" 2>/dev/null || true
   fi
 
   chmod 755 "${DATA_DIR}"
@@ -106,7 +124,8 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=${INSTALL_DIR}
-Environment="USTS_DATA_DIR=${DATA_DIR}"
+Environment="ADMIN_KEY=${ADMIN_KEY}"
+	Environment="USTS_DATA_DIR=${DATA_DIR}"
 Environment="TZ=Asia/Shanghai"
 ExecStartPre=${INSTALL_DIR}/monitor --config-dir ${DATA_DIR}
 ExecStart=${INSTALL_DIR}/webapp --host 0.0.0.0 --port 8080 --config-dir ${DATA_DIR}
@@ -135,7 +154,8 @@ After=network.target
 Type=oneshot
 User=root
 WorkingDirectory=${INSTALL_DIR}
-Environment="USTS_DATA_DIR=${DATA_DIR}"
+Environment="ADMIN_KEY=${ADMIN_KEY}"
+	Environment="USTS_DATA_DIR=${DATA_DIR}"
 Environment="TZ=Asia/Shanghai"
 ExecStart=${INSTALL_DIR}/monitor --config-dir ${DATA_DIR}
 EOF
@@ -328,7 +348,10 @@ case "$CMD" in
       echo "需要 USTS_ADMIN_KEY 环境变量"
       exit 1
     fi
-    USTS_ADMIN_KEY="${ADMIN_KEY:-}" /opt/elec-monitor/push_token "$2" --config-dir /opt/elec-monitor/data
+    ADMIN_KEY=$(cat /opt/elec-monitor/data/.admin_key 2>/dev/null || echo "")
+    echo "服务器 ADMIN_KEY: $ADMIN_KEY"
+    echo "推送 token 到 $2 ..."
+    echo "本地执行: USTS_ADMIN_KEY=$ADMIN_KEY python3 login.py --push $2"
     ;;
   *)
     echo "宿舍电费监控 - 管理工具"
@@ -392,8 +415,6 @@ echo "  配置文件: ${DATA_DIR}/config.json"
 echo "  仪表盘:   http://服务器IP:8080"
 echo ""
 echo "  登录（约 70 天一次）:"
-echo "    1. 本地运行: python3 login.py"
-echo "    2. 推送 token:"
-echo "       USTS_ADMIN_KEY=<key> elec-monitor push-token http://服务器:8080"
+echo "    本地运行: python3 login.py --push http://服务器IP:8080"
 echo ""
 echo "=============================================="
