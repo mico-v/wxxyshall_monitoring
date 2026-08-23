@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -193,40 +194,13 @@ WantedBy=multi-user.target
 	}
 	fmt.Printf("[✓] systemd 服务已创建: %s\n", svcPath)
 
-	// 创建定时采集 timer
-	timerSvc := fmt.Sprintf(`[Unit]
-Description=宿舍电费监控 - 定时采集
-After=network.target
-
-[Service]
-Type=oneshot
-User=root
-WorkingDirectory=%s
-Environment="ELEc_DIR=%s"
-ExecStart=%s/elec collect
-`, dir, dir, dir)
-
-	timerUnit := fmt.Sprintf(`[Unit]
-Description=宿舍电费监控 - 定时采集（每 60 分钟）
-Requires=%s-collect.service
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=60min
-Unit=%s-collect.service
-
-[Install]
-WantedBy=timers.target
-`, serviceName, serviceName)
-
-	os.WriteFile("/etc/systemd/system/"+serviceName+"-collect.service", []byte(timerSvc), 0644)
-	os.WriteFile("/etc/systemd/system/"+serviceName+"-collect.timer", []byte(timerUnit), 0644)
+	// 只生成并启用主服务(采集间隔由 config.json 的 poll_interval_minutes 控制,
+	// 不再创建固定的 60 分钟 systemd timer,避免与配置不一致)
 
 	// 重载并启用
 	exec.Command("systemctl", "daemon-reload").Run()
 	exec.Command("systemctl", "enable", serviceName).Run()
-	exec.Command("systemctl", "enable", serviceName+"-collect.timer").Run()
-	exec.Command("systemctl", "start", serviceName+"-collect.timer").Run()
+	exec.Command("systemctl", "start", serviceName).Run()
 
 	fmt.Println("")
 	fmt.Println("==============================================")
@@ -259,8 +233,8 @@ func cmdRun() {
 	// 生成默认配置
 	config.GenerateDefaultConfig()
 
-	// 读取配置
-	cfg, err := config.LoadConfig()
+	// 配置/Token 热重载 Hub(文件被修改后自动生效,无需重启)
+	hub, err := config.NewHub()
 	if err != nil {
 		slog.Error("配置加载失败", "err", err)
 		os.Exit(1)
@@ -274,14 +248,11 @@ func cmdRun() {
 	}
 
 	// 启动采集循环（后台 goroutine）
-	go func() {
-		runCollectLoop(cfg)
-	}()
+	go runCollectLoop(hub)
 
 	// 启动 webapp
 	server, err := web.NewServer(
-		filepath.Join(data, "config.json"),
-		filepath.Join(data, "token.json"),
+		hub,
 		filepath.Join(data, "electricity.db"),
 		adminKey,
 		dir,
@@ -291,7 +262,7 @@ func cmdRun() {
 		os.Exit(1)
 	}
 
-	port := cfg.Port
+	port := hub.Config().Port
 	if port <= 0 {
 		port = 8080
 	}
@@ -330,25 +301,83 @@ func cmdRun() {
 	slog.Info("服务器已关闭")
 }
 
-// runCollectLoop 后台采集循环。
-func runCollectLoop(cfg *config.Config) {
+// runCollectLoop 后台采集循环:
+//   - 按配置 poll_interval_minutes 定时采集;
+//   - 每 2 秒检测一次 config.json / token.json 变更,配置/间隔/token 修改自动生效;
+//   - token 临近过期时每天提醒一次。
+func runCollectLoop(hub *config.Hub) {
 	// 等待网络就绪
 	time.Sleep(5 * time.Second)
 
-	interval := time.Duration(cfg.PollIntervalMin) * time.Minute
-	if interval <= 0 {
-		interval = 60 * time.Minute
-	}
-
+	interval := collectInterval(hub.Config())
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	// 立即执行一次
-	doCollect(cfg)
+	doCollect(hub.Config())
 
-	for range ticker.C {
-		doCollect(cfg)
+	watch := time.NewTicker(2 * time.Second)
+	defer watch.Stop()
+
+	var lastExpiryWarn time.Time
+
+	for {
+		select {
+		case <-ticker.C:
+			doCollect(hub.Config())
+		case <-watch.C:
+			cfgChanged, tokChanged, err := hub.Reload()
+			if err != nil {
+				slog.Warn("配置热重载失败(将保留上次配置)", "err", err)
+				continue
+			}
+			if tokChanged {
+				slog.Info("检测到 token.json 变更，已热重载")
+			}
+			if !cfgChanged {
+				warnTokenExpiry(hub.Token(), &lastExpiryWarn)
+				continue
+			}
+
+			slog.Info("检测到 config.json 变更，已热重载",
+				"targets", len(hub.Config().GetTargets()),
+				"interval_minutes", hub.Config().PollIntervalMin,
+				"rate_limit", hub.Config().RateLimitPerMinute)
+
+			// 间隔变了 → 重建 ticker
+			ni := collectInterval(hub.Config())
+			if ni != interval {
+				ticker.Reset(ni)
+				interval = ni
+				slog.Info("采集间隔已更新", "interval_minutes", int(ni/time.Minute))
+			}
+			warnTokenExpiry(hub.Token(), &lastExpiryWarn)
+		}
 	}
+}
+
+// collectInterval 从配置取采集间隔,非法值回退 60 分钟。
+func collectInterval(cfg *config.Config) time.Duration {
+	if cfg == nil || cfg.PollIntervalMin <= 0 {
+		return 60 * time.Minute
+	}
+	return time.Duration(cfg.PollIntervalMin) * time.Minute
+}
+
+// warnTokenExpiry 在 token 临近过期(剩余 < 7 天)时每天提醒一次。
+func warnTokenExpiry(tok *config.Token, last *time.Time) {
+	if tok == nil || last == nil {
+		return
+	}
+	left := auth.DaysLeft(tok)
+	if left == math.MaxInt64 || left > 7 {
+		return
+	}
+	if time.Since(*last) < 24*time.Hour {
+		return
+	}
+	*last = time.Now()
+	slog.Warn("token 即将过期，请重新运行 login.py --push", "days_left", left)
 }
 
 func doCollect(cfg *config.Config) {

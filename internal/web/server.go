@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/mico-v/wxxyshall-monitoring/internal/auth"
@@ -30,54 +29,35 @@ const (
 
 // Server 是 HTTP 服务器的主结构体。
 type Server struct {
-	cfg      *config.Config
-	tok      *config.Token
+	cfgHub   *config.Hub
 	database *db.DB
 	limiter  *rate.Limiter
 	hub      *SSEHub
 	jobMgr   *JobManager
-	mu       sync.RWMutex
-	cfgPath  string
-	tokPath  string
-	dbPath   string
 	adminKey string
 	rootDir  string
 }
 
 // NewServer 创建一个新的 HTTP 服务器。
-func NewServer(cfgPath, tokPath, dbPath, adminKey, rootDir string) (*Server, error) {
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		return nil, fmt.Errorf("加载配置失败: %w", err)
-	}
-
-	tok, err := config.LoadToken()
-	if err != nil {
-		return nil, fmt.Errorf("加载 token 失败: %w", err)
-	}
-
+func NewServer(hub *config.Hub, dbPath, adminKey, rootDir string) (*Server, error) {
 	database, err := db.Open(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("打开数据库失败: %w", err)
 	}
 
 	// 回填旧数据
-	if err := database.BackfillRoomIDs(cfg); err != nil {
+	if err := database.BackfillRoomIDs(hub.Config()); err != nil {
 		slog.Warn("回填宿舍 ID 失败", "err", err)
 	}
 
-	hub := NewSSEHub()
+	sseHub := NewSSEHub()
 
 	s := &Server{
-		cfg:      cfg,
-		tok:      tok,
+		cfgHub:   hub,
 		database: database,
-		limiter:  rate.NewLimiter(cfg.RateLimitPerMinute),
-		hub:      hub,
-		jobMgr:   NewJobManager(hub),
-		cfgPath:  cfgPath,
-		tokPath:  tokPath,
-		dbPath:   dbPath,
+		limiter:  rate.NewLimiter(hub.Config().RateLimitPerMinute),
+		hub:      sseHub,
+		jobMgr:   NewJobManager(sseHub),
 		adminKey: adminKey,
 		rootDir:  rootDir,
 	}
@@ -135,9 +115,7 @@ func (s *Server) handleRoom(w http.ResponseWriter, r *http.Request) {
 	room := r.PathValue("room")
 
 	// 验证该宿舍是否在监控列表中
-	s.mu.RLock()
-	targets := s.cfg.GetTargets()
-	s.mu.RUnlock()
+	targets := s.cfgHub.Config().GetTargets()
 	monitored := false
 	for _, t := range targets {
 		if t.Campus == campus && t.Building == building && t.Room == room {
@@ -233,9 +211,7 @@ func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 获取配置中的 label 映射
-	s.mu.RLock()
-	targets := s.cfg.GetTargets()
-	s.mu.RUnlock()
+	targets := s.cfgHub.Config().GetTargets()
 	labelMap := make(map[string]string)
 	for _, t := range targets {
 		labelMap[t.Key()] = t.DisplayLabel()
@@ -267,9 +243,7 @@ func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	cfg := s.cfg
-	s.mu.RUnlock()
+	cfg := s.cfgHub.Config()
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"username": cfg.Username,
@@ -311,8 +285,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		t.Label = t.Campus + "/" + t.Building + "/" + t.Room
 	}
 
-	s.mu.Lock()
-	targets := s.cfg.GetTargets()
+	targets := s.cfgHub.Config().GetTargets()
 	key := t.Campus + "|" + t.Building + "|" + t.Room
 	replaced := false
 	for i, old := range targets {
@@ -339,13 +312,12 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 			Label:     t.Label,
 		})
 	}
-	s.cfg.Targets = targets
-	if err := config.SaveConfig(s.cfg); err != nil {
-		s.mu.Unlock()
+	cfgCopy := *s.cfgHub.Config()
+	cfgCopy.Targets = targets
+	if err := s.cfgHub.SetConfig(&cfgCopy); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存配置失败: " + err.Error()})
 		return
 	}
-	s.mu.Unlock()
 
 	action := "添加"
 	if replaced {
@@ -367,10 +339,8 @@ func (s *Server) handleCollect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.RLock()
-	tok := s.tok
-	cfg := s.cfg
-	s.mu.RUnlock()
+	tok := s.cfgHub.Token()
+	cfg := s.cfgHub.Config()
 
 	if tok == nil || tok.AccessToken == "" {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录，请先运行 python login.py"})
@@ -468,10 +438,8 @@ func (s *Server) handleCollect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCollectAll(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	tok := s.tok
-	cfg := s.cfg
-	s.mu.RUnlock()
+	tok := s.cfgHub.Token()
+	cfg := s.cfgHub.Config()
 
 	if tok == nil || tok.AccessToken == "" {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录，请先运行 python login.py"})
@@ -532,10 +500,8 @@ func (s *Server) handleCollectCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	tok := s.tok
-	cfg := s.cfg
-	s.mu.RUnlock()
+	tok := s.cfgHub.Token()
+	cfg := s.cfgHub.Config()
 
 	if tok == nil || tok.AccessToken == "" {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录，请先运行 python login.py"})
@@ -611,17 +577,13 @@ func (s *Server) handlePushToken(w http.ResponseWriter, r *http.Request) {
 		tok.Source = "upload"
 	}
 
-	if err := config.SaveToken(&tok); err != nil {
+	if err := s.cfgHub.SetToken(&tok); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存 token 失败: " + err.Error()})
 		return
 	}
 
 	days := tok.ExpiresIn / 86400
 	slog.Info("收到 token 推送", "expires_in_days", days)
-
-	s.mu.Lock()
-	s.tok = &tok
-	s.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":              true,
@@ -685,9 +647,7 @@ func (s *Server) handle404(w http.ResponseWriter, r *http.Request) {
 func (s *Server) rateLimit(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.limiter.Allow() {
-			s.mu.RLock()
-			limit := s.cfg.RateLimitPerMinute
-			s.mu.RUnlock()
+			limit := s.cfgHub.Config().RateLimitPerMinute
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{
 				"error": fmt.Sprintf("请求过于频繁:每分钟最多 %d 次，请稍后再试", limit),
 			})
