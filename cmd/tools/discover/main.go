@@ -1,9 +1,10 @@
 // discover 列出校区/楼栋/房间的取值。
 //
 // 用法:
-//   discover                    # 列校区
-//   discover <campus>           # 列该校区楼栋
-//   discover <campus> <building> # 列该楼栋房间
+//
+//	discover                    # 列校区
+//	discover <campus>           # 列该校区楼栋
+//	discover <campus> <building> # 列该楼栋房间
 package main
 
 import (
@@ -13,6 +14,7 @@ import (
 
 	"github.com/mico-v/wxxyshall-monitoring/internal/charge"
 	"github.com/mico-v/wxxyshall-monitoring/internal/config"
+	"github.com/mico-v/wxxyshall-monitoring/internal/rate"
 )
 
 func main() {
@@ -34,7 +36,7 @@ func main() {
 	}
 
 	fid := targets[0].FeeItemID
-	client := charge.NewClient(cfg.BaseURL, tok.AccessToken)
+	client := charge.NewClientWithLimiter(cfg.BaseURL, tok.AccessToken, rate.NewLimiter(cfg.RateLimitPerMinute))
 	if err := client.Establish(fid, targets[0].AppID); err != nil {
 		log.Fatalf("建立会话失败: %v", err)
 	}

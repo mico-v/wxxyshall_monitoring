@@ -3,6 +3,9 @@ config.json
 token.json
 storage_state_live.json
 electricity.db*
+.admin_key
+__pycache__/
+*.py[cod]
 
 # Docker 数据卷
 data/

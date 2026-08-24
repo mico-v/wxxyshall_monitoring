@@ -10,6 +10,7 @@ import (
 
 	"github.com/mico-v/wxxyshall-monitoring/internal/charge"
 	"github.com/mico-v/wxxyshall-monitoring/internal/config"
+	"github.com/mico-v/wxxyshall-monitoring/internal/rate"
 )
 
 func main() {
@@ -37,7 +38,7 @@ func main() {
 	campus, building, room := os.Args[1], os.Args[2], os.Args[3]
 	fid := targets[0].FeeItemID
 
-	client := charge.NewClient(cfg.BaseURL, tok.AccessToken)
+	client := charge.NewClientWithLimiter(cfg.BaseURL, tok.AccessToken, rate.NewLimiter(cfg.RateLimitPerMinute))
 	if err := client.Establish(fid, targets[0].AppID); err != nil {
 		log.Fatalf("建立会话失败: %v", err)
 	}

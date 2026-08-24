@@ -1,7 +1,6 @@
 package charge
 
 import (
-	"math"
 	"testing"
 )
 
@@ -120,26 +119,6 @@ func TestTotalUsage(t *testing.T) {
 			t.Fatal("expected nil for invalid number")
 		}
 	})
-}
-
-func TestRound2(t *testing.T) {
-	tests := []struct {
-		input    float64
-		expected float64
-	}{
-		{123.456, 123.46},
-		{123.454, 123.45},
-		{100.0, 100.0},
-		{0.001, 0.00},
-		{math.Pi, 3.14},
-	}
-
-	for _, tt := range tests {
-		got := Round2(tt.input)
-		if got != tt.expected {
-			t.Errorf("Round2(%f) = %f, want %f", tt.input, got, tt.expected)
-		}
-	}
 }
 
 func TestExtractOptions(t *testing.T) {

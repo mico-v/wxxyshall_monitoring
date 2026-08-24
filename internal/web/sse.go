@@ -2,15 +2,18 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 )
 
+const maxSSEClients = 128
+
 // SSEEvent 代表一个 SSE 事件。
 type SSEEvent struct {
-	Event string      // 事件类型: "reading", "collect-progress", "heartbeat"
+	Event string      // 事件类型: "reading", "heartbeat"
 	Data  interface{} // JSON 可序列化的数据
 }
 
@@ -19,6 +22,7 @@ type SSEHub struct {
 	mu      sync.RWMutex
 	clients map[string]chan SSEEvent
 	nextID  int
+	closed  bool
 }
 
 // NewSSEHub 创建一个新的 SSE Hub。
@@ -30,15 +34,23 @@ func NewSSEHub() *SSEHub {
 
 // Subscribe 注册一个新的 SSE 客户端。
 // 返回客户端 ID 和接收事件的 channel。
-func (h *SSEHub) Subscribe() (string, <-chan SSEEvent) {
+func (h *SSEHub) Subscribe() (string, <-chan SSEEvent, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	h.nextID++
 	id := fmt.Sprintf("sse-%d", h.nextID)
 	ch := make(chan SSEEvent, 16)
+	if h.closed {
+		close(ch)
+		return id, ch, false
+	}
+	if len(h.clients) >= maxSSEClients {
+		close(ch)
+		return id, ch, false
+	}
 	h.clients[id] = ch
-	return id, ch
+	return id, ch, true
 }
 
 // Unsubscribe 注销一个 SSE 客户端。
@@ -68,18 +80,15 @@ func (h *SSEHub) Broadcast(event string, data interface{}) {
 	}
 }
 
-// ClientCount 返回当前连接的客户端数量。
-func (h *SSEHub) ClientCount() int {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return len(h.clients)
-}
-
 // Close 关闭所有客户端连接并释放资源。
 // 在服务器优雅关闭时调用。
 func (h *SSEHub) Close() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.closed {
+		return
+	}
+	h.closed = true
 	for id, ch := range h.clients {
 		close(ch)
 		delete(h.clients, id)
@@ -104,24 +113,14 @@ func MarshalHeartbeat() []byte {
 
 // ReadingEvent 是 SSE 推送的读数事件。
 type ReadingEvent struct {
-	TS            string  `json:"ts"`
-	Epoch         int64   `json:"epoch"`
-	Campus        string  `json:"campus"`
-	Building      string  `json:"building"`
-	Room          string  `json:"room"`
-	RoomLabel     string  `json:"room_label"`
-	SurplusCharge float64 `json:"surplus_charge"`
-	TotalUsage    float64 `json:"total_usage"`
-}
-
-// JobProgressEvent 是 SSE 推送的采集进度事件。
-type JobProgressEvent struct {
-	JobID    string `json:"job_id"`
-	State    string `json:"state"`
-	Total    int    `json:"total"`
-	Done     int    `json:"done"`
-	Percent  int    `json:"percent"`
-	Current  string `json:"current,omitempty"`
+	TS            string   `json:"ts"`
+	Epoch         int64    `json:"epoch"`
+	Campus        string   `json:"campus"`
+	Building      string   `json:"building"`
+	Room          string   `json:"room"`
+	RoomLabel     string   `json:"room_label"`
+	SurplusCharge *float64 `json:"surplus_charge"`
+	TotalUsage    *float64 `json:"total_usage"`
 }
 
 // ---- 采集任务管理 ----
@@ -130,11 +129,12 @@ type JobProgressEvent struct {
 type JobState string
 
 const (
-	JobStateQueued    JobState = "queued"
-	JobStateRunning   JobState = "running"
-	JobStateDone      JobState = "done"
-	JobStateFailed    JobState = "failed"
-	JobStateCancelled JobState = "cancelled"
+	JobStateQueued     JobState = "queued"
+	JobStateRunning    JobState = "running"
+	JobStateCancelling JobState = "cancelling"
+	JobStateDone       JobState = "done"
+	JobStateFailed     JobState = "failed"
+	JobStateCancelled  JobState = "cancelled"
 )
 
 // JobCurrent 表示当前正在采集的宿舍。
@@ -147,52 +147,52 @@ type JobCurrent struct {
 
 // JobResult 表示单个宿舍的采集结果。
 type JobResult struct {
-	RoomLabel     string  `json:"room_label"`
-	DisplayLabel  string  `json:"display_label"`
-	Campus        string  `json:"campus"`
-	Building      string  `json:"building"`
-	Room          string  `json:"room"`
+	RoomLabel     string   `json:"room_label"`
+	DisplayLabel  string   `json:"display_label"`
+	Campus        string   `json:"campus"`
+	Building      string   `json:"building"`
+	Room          string   `json:"room"`
 	SurplusCharge *float64 `json:"surplus_charge"`
 	TotalUsage    *float64 `json:"total_usage"`
-	Error         string  `json:"error,omitempty"`
+	Error         string   `json:"error,omitempty"`
 }
 
 // CollectJob 代表一个批量采集任务。
 type CollectJob struct {
-	ID        string       `json:"job_id"`
-	State     JobState     `json:"state"`
-	Requested int          `json:"requested"`
-	Completed int          `json:"completed"`
-	Success   int          `json:"success"`
-	Failed    int          `json:"failed"`
-	Skipped   int          `json:"skipped"`
-	Percent   int          `json:"percent"`
-	Current   *JobCurrent  `json:"current,omitempty"`
-	Results   []JobResult  `json:"results"`
-	Error     string       `json:"error,omitempty"`
-	CreatedAt time.Time    `json:"created_at"`
-	UpdatedAt time.Time    `json:"updated_at"`
+	ID        string      `json:"job_id"`
+	State     JobState    `json:"state"`
+	Requested int         `json:"requested"`
+	Completed int         `json:"completed"`
+	Success   int         `json:"success"`
+	Failed    int         `json:"failed"`
+	Percent   int         `json:"percent"`
+	Current   *JobCurrent `json:"current,omitempty"`
+	Results   []JobResult `json:"results,omitempty"`
+	Error     string      `json:"error,omitempty"`
+	CreatedAt time.Time   `json:"created_at"`
+	UpdatedAt time.Time   `json:"updated_at"`
 }
 
 // JobManager 管理后台采集任务。
 type JobManager struct {
 	mu       sync.Mutex
+	wg       sync.WaitGroup
 	jobs     map[string]*CollectJob
 	activeID string
-	hub      *SSEHub
+	cancels  map[string]context.CancelFunc
 }
 
 // NewJobManager 创建一个新的任务管理器。
-func NewJobManager(hub *SSEHub) *JobManager {
+func NewJobManager() *JobManager {
 	return &JobManager{
-		jobs: make(map[string]*CollectJob),
-		hub:  hub,
+		jobs:    make(map[string]*CollectJob),
+		cancels: make(map[string]context.CancelFunc),
 	}
 }
 
 // Start 创建一个新的采集任务。
 // 如果已有运行中的任务，返回 false。
-func (jm *JobManager) Start(targets int) (*CollectJob, bool) {
+func (jm *JobManager) Start(parent context.Context, targets int) (*CollectJob, context.Context, bool) {
 	jm.mu.Lock()
 	defer jm.mu.Unlock()
 
@@ -201,9 +201,10 @@ func (jm *JobManager) Start(targets int) (*CollectJob, bool) {
 
 	// 检查是否有正在运行的任务
 	if jm.activeID != "" {
-		if job, ok := jm.jobs[jm.activeID]; ok && (job.State == JobStateQueued || job.State == JobStateRunning) {
-			return nil, false
+		if _, ok := jm.jobs[jm.activeID]; ok {
+			return nil, nil, false
 		}
+		jm.activeID = ""
 	}
 
 	// 创建新任务
@@ -218,7 +219,10 @@ func (jm *JobManager) Start(targets int) (*CollectJob, bool) {
 	}
 	jm.jobs[id] = job
 	jm.activeID = id
-	return job, true
+	jm.wg.Add(1)
+	ctx, cancel := context.WithCancel(parent)
+	jm.cancels[id] = cancel
+	return cloneJob(job), ctx, true
 }
 
 // Get 获取任务快照。
@@ -232,10 +236,7 @@ func (jm *JobManager) Get(id string) *CollectJob {
 		return nil
 	}
 	// 返回副本
-	cp := *job
-	cp.Results = make([]JobResult, len(job.Results))
-	copy(cp.Results, job.Results)
-	return &cp
+	return cloneJob(job)
 }
 
 // Update 更新任务状态。
@@ -249,51 +250,73 @@ func (jm *JobManager) Update(id string, fn func(job *CollectJob)) {
 	fn(job)
 	job.UpdatedAt = time.Now()
 	jm.mu.Unlock()
-
-	// 广播进度
-	jm.hub.Broadcast("collect-progress", JobProgressEvent{
-		JobID:   id,
-		State:   string(job.State),
-		Total:   job.Requested,
-		Done:    job.Completed,
-		Percent: job.Percent,
-		Current: func() string {
-			if job.Current != nil {
-				return job.Current.Label
-			}
-			return ""
-		}(),
-	})
 }
 
 // FinishActive 清除当前活跃任务标记。
 func (jm *JobManager) FinishActive(id string) {
 	jm.mu.Lock()
-	defer jm.mu.Unlock()
 	if jm.activeID == id {
 		jm.activeID = ""
 	}
+	delete(jm.cancels, id)
+	jm.mu.Unlock()
+	jm.wg.Done()
 }
 
-// Cancel 尝试取消当前正在运行的采集任务。
-// 如果任务不存在或已结束，返回 false。
-func (jm *JobManager) Cancel() bool {
-	jm.mu.Lock()
-	defer jm.mu.Unlock()
-	if jm.activeID == "" {
+func (jm *JobManager) Wait(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		jm.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Cancel 仅取消 ID 精确匹配的当前任务，避免旧客户端误取消后续任务。
+func (jm *JobManager) Cancel(id string) bool {
+	if id == "" {
 		return false
 	}
-	job, ok := jm.jobs[jm.activeID]
+	return jm.cancel(id)
+}
+
+// CancelActive 用于服务关闭时取消当前任务。
+func (jm *JobManager) CancelActive() bool { return jm.cancel("") }
+
+func (jm *JobManager) cancel(expectedID string) bool {
+	jm.mu.Lock()
+	if jm.activeID == "" {
+		jm.mu.Unlock()
+		return false
+	}
+	id := jm.activeID
+	if expectedID != "" && id != expectedID {
+		jm.mu.Unlock()
+		return false
+	}
+	job, ok := jm.jobs[id]
 	if !ok {
 		jm.activeID = ""
+		jm.mu.Unlock()
 		return false
 	}
 	if job.State != JobStateQueued && job.State != JobStateRunning {
+		jm.mu.Unlock()
 		return false
 	}
-	job.State = JobStateCancelled
+	job.State = JobStateCancelling
+	job.Current = nil
 	job.UpdatedAt = time.Now()
-	jm.activeID = ""
+	cancel := jm.cancels[id]
+	jm.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	return true
 }
 
@@ -301,10 +324,24 @@ func (jm *JobManager) Cancel() bool {
 func (jm *JobManager) cleanup() {
 	cutoff := time.Now().Add(-15 * time.Minute)
 	for id, job := range jm.jobs {
-		if job.State == JobStateDone || job.State == JobStateFailed {
+		if job.State == JobStateDone || job.State == JobStateFailed || job.State == JobStateCancelled {
 			if job.UpdatedAt.Before(cutoff) {
 				delete(jm.jobs, id)
+				delete(jm.cancels, id)
 			}
 		}
 	}
+}
+
+func cloneJob(job *CollectJob) *CollectJob {
+	if job == nil {
+		return nil
+	}
+	cp := *job
+	cp.Results = append([]JobResult(nil), job.Results...)
+	if job.Current != nil {
+		current := *job.Current
+		cp.Current = &current
+	}
+	return &cp
 }

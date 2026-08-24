@@ -5,8 +5,10 @@
 安全键盘的"位置→真实字符"映射只在键位图片里，故密码由你手动点击输入。
 
 用法:
-  python3 login.py                                      # 只存本地 token.json
+  python3 login.py                                      # 保存到 token.json（或 ELEc_DIR/data/token.json）
+  python3 login.py --output /opt/elec/data/token.json    # 指定本地保存位置
   python3 login.py --push http://服务器:8080             # 存本地 + 推送到服务器
+  python3 login.py --push http://服务器:8080 --push-only # 只推送，不在本地落盘
   python3 login.py --browser /usr/bin/chromium           # 指定浏览器路径
 
 环境变量:
@@ -19,6 +21,8 @@ import os
 import sys
 import time
 import argparse
+import tempfile
+from pathlib import Path
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -28,22 +32,51 @@ for _s in (sys.stdout, sys.stderr):
 
 from playwright.async_api import async_playwright
 
-TOKEN_FILE = "token.json"
+def default_token_file() -> Path:
+    root = os.environ.get("ELEc_DIR")
+    return Path(root) / "data" / "token.json" if root else Path("token.json")
 
 
-def save_token(tok: dict) -> None:
+def save_token(tok: dict, output: Path) -> None:
     """保存 token 到本地文件。"""
-    with open(TOKEN_FILE, "w", encoding="utf-8") as f:
-        json.dump(tok, f, ensure_ascii=False, indent=2)
+    output = output.expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+    fd, temp_name = tempfile.mkstemp(prefix=".token-", dir=output.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(tok, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_name, output)
+        os.chmod(output, 0o600)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
     days = (tok.get("expires_in") or 0) // 86400
-    print(f"[OK] token 已保存到 {TOKEN_FILE}（学号={tok.get('sno')}，有效期约 {days} 天）")
+    print(f"[OK] token 已保存到 {output}（学号={tok.get('sno')}，有效期约 {days} 天）")
 
 
-def push_token(server_url: str, tok: dict) -> None:
+def push_token(server_url: str, tok: dict, admin_key_file: str | None) -> None:
     """推送 token 到远程服务器。"""
     import requests
 
-    key = os.environ.get("ADMIN_KEY")
+    key = ""
+    if admin_key_file:
+        try:
+            key = Path(admin_key_file).expanduser().read_text(encoding="utf-8").strip()
+        except OSError as e:
+            raise SystemExit(f"[x] 读取管理密钥文件失败: {e}") from e
+    if not key:
+        key = os.environ.get("ADMIN_KEY", "").strip()
     if not key:
         print("[x] 需要 ADMIN_KEY 环境变量来推送 token（与服务器 ADMIN_KEY 一致）")
         sys.exit(1)
@@ -51,7 +84,7 @@ def push_token(server_url: str, tok: dict) -> None:
     url = server_url.rstrip("/") + "/api/token"
     r = requests.post(url, json=tok,
                       headers={"Authorization": f"Bearer {key}"},
-                      timeout=20)
+                      timeout=20, allow_redirects=False)
     try:
         j = r.json()
     except ValueError:
@@ -88,7 +121,13 @@ async def main():
     parser = argparse.ArgumentParser(description="登录并获取 token")
     parser.add_argument("--push", metavar="URL", help="推送 token 到服务器地址")
     parser.add_argument("--browser", metavar="PATH", help="浏览器可执行文件路径")
+    parser.add_argument("--output", metavar="PATH", help="本地 token 输出路径")
+    parser.add_argument("--push-only", action="store_true", help="只推送，不保存本地 token")
+    parser.add_argument("--admin-key-file", metavar="PATH", help="从文件读取推送所需管理密钥")
+    parser.add_argument("--storage-state", metavar="PATH", help="可选：保存浏览器 storage state（含敏感登录态）")
     args = parser.parse_args()
+    if args.push_only and not args.push:
+        parser.error("--push-only 必须与 --push 一起使用")
 
     captured = {"net": None, "store": None}
 
@@ -171,20 +210,32 @@ async def main():
 
         token_data = {
             "access_token": tok["access_token"],
-            "expires_in": tok.get("expires_in"),
+            "expires_in": int(tok.get("expires_in") or 0),
             "login_time": int(time.time()),
-            "sno": tok.get("sno"),
+            "sno": str(tok.get("sno") or ""),
             "source": "network" if captured["net"] else "storage",
         }
+        if tok.get("refresh_token"):
+            token_data["refresh_token"] = tok["refresh_token"]
 
         # 保存本地
-        save_token(token_data)
+        if not args.push_only:
+            save_token(token_data, Path(args.output) if args.output else default_token_file())
 
         # 推送远程
         if args.push:
-            push_token(args.push, token_data)
+            push_token(args.push, token_data, args.admin_key_file)
 
-        await ctx.storage_state(path="storage_state_live.json")
+        if args.storage_state:
+            old_umask = os.umask(0o077)
+            try:
+                await ctx.storage_state(path=args.storage_state)
+            finally:
+                os.umask(old_umask)
+            try:
+                os.chmod(args.storage_state, 0o600)
+            except OSError as e:
+                print(f"  [warn] 无法收紧 storage state 权限: {e}")
         await browser.close()
 
 

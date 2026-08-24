@@ -1,74 +1,93 @@
-const CACHE_NAME = 'elec-monitor-v3';
-const STATIC_ASSETS = [
-    '/404.html',
-    '/offline.html',
-    '/manifest.json',
+const CACHE_PREFIX = 'elec-monitor-';
+const CACHE_NAME = `${CACHE_PREFIX}v6`;
+const APP_SHELL = [
+  '/',
+  '/offline.html',
+  '/404.html',
+  '/manifest.json',
+  '/static/echarts.min.js',
+  '/static/icon-192.png',
+  '/static/icon-512.png',
 ];
 
-// 安装: 预缓存静态资源
 self.addEventListener('install', event => {
-    event.waitUntil(
-        caches.open(CACHE_NAME).then(cache => cache.addAll(STATIC_ASSETS))
-    );
-    self.skipWaiting();
+  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)));
+  self.skipWaiting();
 });
 
-// 激活: 清理旧缓存
 self.addEventListener('activate', event => {
-    event.waitUntil(
-        caches.keys().then(keys =>
-            Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
-        )
-    );
-    self.clients.claim();
+  event.waitUntil(
+    caches.keys().then(keys => Promise.all(
+      keys.filter(key => key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME)
+        .map(key => caches.delete(key))
+    ))
+  );
+  self.clients.claim();
 });
 
-// 拦截请求
 self.addEventListener('fetch', event => {
-    const url = new URL(event.request.url);
+  const request = event.request;
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin || url.pathname === '/api/events') return;
 
-    // SSE 端点不缓存
-    if (url.pathname === '/api/events') return;
+  // 管理请求和所有写请求绝不进入缓存。
+  if (request.method !== 'GET' || request.headers.has('Authorization')) {
+    event.respondWith(fetch(request));
+    return;
+  }
 
-    // 带版本号的静态资源: Cache First
-    if (url.pathname.startsWith('/static/')) {
-        event.respondWith(cacheFirst(event.request));
-        return;
-    }
+  if (url.pathname.startsWith('/static/') || url.pathname === '/manifest.json') {
+    event.respondWith(cacheFirst(request));
+    return;
+  }
 
-    // API 请求: Network First, fallback to cache
-    if (url.pathname.startsWith('/api/')) {
-        event.respondWith(networkFirst(event.request));
-        return;
-    }
+  if (url.pathname.startsWith('/api/')) {
+    event.respondWith(networkFirst(request, null, true));
+    return;
+  }
 
-    // 页面(含 / 与 /room/...): Network First,离线回退 -> 部署后自动生效不陈旧
-    if (event.request.mode === 'navigate') {
-        event.respondWith(networkFirst(event.request, '/offline.html'));
-        return;
-    }
+  if (request.mode === 'navigate') {
+    event.respondWith(networkFirst(request, '/'));
+    return;
+  }
 
-    // 其它(manifest/404 等): Network First, fallback to cache
-    event.respondWith(networkFirst(event.request));
+  event.respondWith(networkFirst(request));
 });
 
 async function cacheFirst(request) {
-    const cached = await caches.match(request);
-    return cached || fetch(request);
+  const cached = await caches.match(request);
+  if (cached) return cached;
+  const response = await fetch(request);
+  if (response.ok) {
+    const cache = await caches.open(CACHE_NAME);
+    await cache.put(request, response.clone());
+  }
+  return response;
 }
 
-async function networkFirst(request, fallbackUrl) {
-    try {
-        const response = await fetch(request);
-        if (response.ok) {
-            const cache = await caches.open(CACHE_NAME);
-            cache.put(request, response.clone());
-        }
-        return response;
-    } catch (err) {
-        const cached = await caches.match(request);
-        if (cached) return cached;
-        if (fallbackUrl) return caches.match(fallbackUrl);
-        throw err;
+async function networkFirst(request, fallbackUrl, apiRequest = false) {
+  try {
+    const response = await fetch(request);
+    if (response.ok) {
+      const cache = await caches.open(CACHE_NAME);
+      await cache.put(request, response.clone());
     }
+    return response;
+  } catch (err) {
+    const cached = await caches.match(request);
+    if (cached) return cached;
+    if (fallbackUrl) {
+      const fallback = await caches.match(fallbackUrl);
+      if (fallback) return fallback;
+    }
+    if (apiRequest) {
+      return new Response(JSON.stringify({ error: '离线且没有该请求的缓存数据' }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
+      });
+    }
+    const offline = await caches.match('/offline.html');
+    if (offline) return offline;
+    throw err;
+  }
 }

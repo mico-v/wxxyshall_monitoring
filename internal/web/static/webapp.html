@@ -6,6 +6,7 @@
 <title>宿舍电费监控</title>
 <link rel="icon" href="data:,">
 <link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
 <meta name="theme-color" content="#2a78d6">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <script>
@@ -182,6 +183,12 @@ if ('serviceWorker' in navigator) {
   .target-item .tl-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .target-item .tl-id { color: var(--ink-3); font-size: 11px;
     font-variant-numeric: tabular-nums; }
+  .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: var(--ink-2); font-size: 11px; }
+  .field input {
+    width: 100%; min-width: 0; font: inherit; font-size: 13px; color: var(--ink-1);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px;
+  }
+  .settings-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 18px; }
   .empty-hint { color: var(--ink-3); font-size: 12px; padding: 6px 2px; }
 
   .picker { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 8px; }
@@ -374,6 +381,23 @@ if ('serviceWorker' in navigator) {
 
 <div id="toast" role="status" aria-live="polite"></div>
 
+<!-- 管理密钥输入：仅保存到当前标签页的 sessionStorage -->
+<div class="modal-overlay" id="admin-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="admin-title" style="max-width:420px">
+    <div class="modal-hd"><h2 id="admin-title">管理鉴权</h2></div>
+    <div class="modal-bd">
+      <label class="field">管理密钥
+        <input id="admin-key-input" type="password" autocomplete="new-password" maxlength="256" spellcheck="false">
+      </label>
+      <div class="label-hint">密钥只保存在当前浏览器标签页，关闭标签页后失效。</div>
+      <div class="settings-actions">
+        <button id="admin-cancel" class="theme-btn" type="button">取消</button>
+        <button id="admin-submit" class="btn" type="button">验证</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- 查询设置弹窗 -->
 <div class="modal-overlay" id="settings-modal" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -382,7 +406,7 @@ if ('serviceWorker' in navigator) {
       <button class="theme-btn" id="modal-close" type="button">✕</button>
     </div>
     <div class="modal-bd">
-      <h3>监控宿舍</h3>
+      <h3>已监控宿舍</h3>
       <div id="target-list" class="target-list"></div>
 
       <h3>添加宿舍(电费)</h3>
@@ -427,6 +451,23 @@ document.getElementById("theme-btn").addEventListener("click", () => {
 let eventSource = null;
 let sseConnected = false;
 let pollTimer = null;
+let sseRefreshTimer = null;
+const ACTIVE_JOB_SESSION = "elec-active-collect-job";
+let activeJobId = sessionStorage.getItem(ACTIVE_JOB_SESSION) || "";
+
+function setActiveJobId(jobId) {
+  activeJobId = jobId || "";
+  if (activeJobId) sessionStorage.setItem(ACTIVE_JOB_SESSION, activeJobId);
+  else sessionStorage.removeItem(ACTIVE_JOB_SESSION);
+}
+
+function scheduleReadingRefresh() {
+  clearTimeout(sseRefreshTimer);
+  sseRefreshTimer = setTimeout(() => {
+    sseRefreshTimer = null;
+    refresh();
+  }, 300);
+}
 
 function connectSSE() {
   if (eventSource) { eventSource.close(); }
@@ -445,16 +486,9 @@ function connectSSE() {
           (state.room.campus === data.campus &&
            state.room.building === data.building &&
            state.room.room === data.room)) {
-        refresh();
+        scheduleReadingRefresh();
       }
     } catch (err) { console.warn('SSE reading 解析失败:', err); }
-  });
-
-  eventSource.addEventListener('collect-progress', function(e) {
-    try {
-      const data = JSON.parse(e.data);
-      collectAllProgress(data);
-    } catch (err) { console.warn('SSE collect-progress 解析失败:', err); }
   });
 
   eventSource.addEventListener('heartbeat', function() {
@@ -531,8 +565,13 @@ function groupByRoom(rows) {
     if (!m.has(k)) m.set(k, { label: labelForRow(r), rows: [] });
     m.get(k).rows.push(r);
   });
-  const g = [...m.values()];
-  g.sort((a, b) => a.label.localeCompare(b.label, "zh"));
+  const order = new Map(state.targets.map((target, index) => [roomKey(target), index]));
+  const g = [...m.entries()].map(([key, group]) => ({ ...group, key }));
+  g.sort((a, b) => {
+    const ai = order.has(a.key) ? order.get(a.key) : Number.MAX_SAFE_INTEGER;
+    const bi = order.has(b.key) ? order.get(b.key) : Number.MAX_SAFE_INTEGER;
+    return ai - bi || a.label.localeCompare(b.label, "zh");
+  });
   return g;
 }
 
@@ -541,6 +580,7 @@ let state = {
   days: 0,
   data: [],
   targets: [],        // 来自 /api/config
+  defaults: { feeitemid: 409, appId: 34 },
   room: null,         // 当前查看的宿舍 {campus,building,room,label},null=全部
 };
 
@@ -571,7 +611,7 @@ window.addEventListener("popstate", () => {   // 浏览器前进/后退
   refresh();
 });
 
-async function fetchReadings() {
+function readingsURL() {
   const q = new URLSearchParams();
   if (state.days) q.set("days", state.days);
   if (state.room) {
@@ -579,9 +619,34 @@ async function fetchReadings() {
     q.set("building", state.room.building);
     q.set("room", state.room.room);
   }
-  const r = await fetch("/api/readings?" + q, { cache: "no-store" });
+  const suffix = q.toString();
+  return "/api/readings" + (suffix ? "?" + suffix : "");
+}
+
+async function fetchReadings() {
+  const r = await fetch(readingsURL(), { cache: "no-store" });
   if (!r.ok) throw new Error("HTTP " + r.status);
   return await r.json();
+}
+
+async function refreshPublicConfig() {
+  const r = await fetch("/api/config", { cache: "no-store" });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  const cfg = await r.json();
+  const nextTargets = cfg.targets || [];
+  const changed = JSON.stringify(nextTargets) !== JSON.stringify(state.targets);
+  state.targets = nextTargets;
+  if (cfg.defaults) state.defaults = cfg.defaults;
+  if (changed && state.data.length) render();
+  return cfg;
+}
+
+let configPollTimer = null;
+function startConfigPolling() {
+  if (configPollTimer) clearInterval(configPollTimer);
+  configPollTimer = setInterval(() => {
+    refreshPublicConfig().catch(e => console.warn("配置刷新失败:", e));
+  }, 30000);
 }
 
 /* 刷新序号:并发刷新时丢弃过期结果,避免旧 fetch 覆盖新数据(钻取/返回快速切换时) */
@@ -630,7 +695,7 @@ function renderBackButton() {
 function renderKpis() {
   const holder = document.getElementById("kpis");
   if (!state.data.length) {
-    holder.innerHTML = '<div class="empty">暂无读数,先运行 python monitor.py</div>';
+    holder.innerHTML = '<div class="empty">暂无读数，可点击“立即采集”获取第一条记录</div>';
     document.getElementById("room-sub").textContent = "—";
     return;
   }
@@ -989,6 +1054,86 @@ function initBackButton() {
 /* ============ 查询设置 ============ */
 let draftTargets = [];
 let pickCampus = null, pickBuilding = null, pickRoom = null;
+const ADMIN_KEY_SESSION = "elec-admin-key";
+let adminKey = sessionStorage.getItem(ADMIN_KEY_SESSION) || "";
+let adminPromptResolver = null;
+
+function initAdminPrompt() {
+  const modal = document.getElementById("admin-modal");
+  const input = document.getElementById("admin-key-input");
+  const finish = value => {
+    modal.hidden = true;
+    const resolve = adminPromptResolver;
+    adminPromptResolver = null;
+    if (resolve) resolve(value);
+  };
+  document.getElementById("admin-submit").addEventListener("click", () => finish(input.value.trim()));
+  document.getElementById("admin-cancel").addEventListener("click", () => finish(""));
+  input.addEventListener("keydown", event => {
+    if (event.key === "Enter") { event.preventDefault(); finish(input.value.trim()); }
+    if (event.key === "Escape") { event.preventDefault(); finish(""); }
+  });
+  modal.addEventListener("click", event => { if (event.target === modal) finish(""); });
+}
+
+function promptAdminKey() {
+  if (adminPromptResolver) return Promise.resolve("");
+  const modal = document.getElementById("admin-modal");
+  const input = document.getElementById("admin-key-input");
+  input.value = "";
+  modal.hidden = false;
+  setTimeout(() => input.focus(), 0);
+  return new Promise(resolve => { adminPromptResolver = resolve; });
+}
+
+async function adminFetch(url, options = {}) {
+  if (!adminKey) throw new Error("需要管理密钥");
+  const headers = new Headers(options.headers || {});
+  headers.set("Authorization", `Bearer ${adminKey}`);
+  const response = await fetch(url, { ...options, headers, cache: options.cache || "no-store" });
+  if (response.status === 401) {
+    adminKey = "";
+    sessionStorage.removeItem(ADMIN_KEY_SESSION);
+  }
+  return response;
+}
+
+async function responseJSON(response) {
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(body.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  return body;
+}
+
+async function ensureAdmin() {
+  if (adminKey) {
+    try {
+      await responseJSON(await adminFetch("/api/admin/verify", { method: "POST" }));
+      return true;
+    } catch (e) {
+      if (adminKey) throw e;
+    }
+  }
+  const entered = await promptAdminKey();
+  if (!entered) return false;
+  adminKey = entered.trim();
+  try {
+    await responseJSON(await adminFetch("/api/admin/verify", { method: "POST" }));
+    sessionStorage.setItem(ADMIN_KEY_SESSION, adminKey);
+    return true;
+  } catch (e) {
+    adminKey = "";
+    sessionStorage.removeItem(ADMIN_KEY_SESSION);
+    throw e;
+  }
+}
+
+function discoveryParams(extra = {}) {
+  return new URLSearchParams(extra);
+}
 
 function fillSelect(el, items, placeholder, disabled) {
   el.textContent = "";
@@ -1006,22 +1151,17 @@ function fillSelect(el, items, placeholder, disabled) {
 }
 
 async function loadCampuses() {
-  const d = await (await fetch("/api/campuses")).json();
-  if (d.error) throw new Error(d.error);
+  const d = await responseJSON(await adminFetch(`/api/campuses?${discoveryParams()}`));
   fillSelect(document.getElementById("pick-campus"), d, "— 选择校区 —", false);
 }
 
 async function loadBuildings(campus) {
-  const d = await (await fetch(`/api/buildings?campus=${encodeURIComponent(campus)}`)).json();
-  if (d.error) throw new Error(d.error);
+  const d = await responseJSON(await adminFetch(`/api/buildings?${discoveryParams({ campus })}`));
   fillSelect(document.getElementById("pick-building"), d, "— 选择楼栋 —", false);
 }
 
 async function loadRooms(campus, building) {
-  const d = await (await fetch(
-    `/api/rooms?campus=${encodeURIComponent(campus)}&building=${encodeURIComponent(building)}`
-  )).json();
-  if (d.error) throw new Error(d.error);
+  const d = await responseJSON(await adminFetch(`/api/rooms?${discoveryParams({ campus, building })}`));
   fillSelect(document.getElementById("pick-room"), d, "— 选择房间 —", false);
 }
 
@@ -1060,7 +1200,7 @@ function renderTargetList() {
     wrap.appendChild(div);
     return;
   }
-  draftTargets.forEach((t, i) => {
+  draftTargets.forEach(t => {
     const item = document.createElement("div");
     item.className = "target-item";
     const name = document.createElement("span");
@@ -1074,13 +1214,19 @@ function renderTargetList() {
   });
 }
 
+async function openSettings() {
+  if (!await ensureAdmin()) return;
+  const cfg = await refreshPublicConfig();
+  draftTargets = (cfg.targets || []).map(t => ({ ...t }));
+  renderTargetList();
+  resetPicker();
+  document.getElementById("settings-modal").hidden = false;
+}
+
 function initSettings() {
   const modal = document.getElementById("settings-modal");
   document.getElementById("settings-btn").addEventListener("click", () => {
-    draftTargets = state.targets.map(t => ({ ...t }));
-    renderTargetList();
-    resetPicker();
-    modal.hidden = false;
+    openSettings().catch(e => toast("打开设置失败: " + e.message, true));
   });
   document.getElementById("modal-close").addEventListener("click", () => { modal.hidden = true; });
   modal.addEventListener("click", e => { if (e.target === modal) modal.hidden = true; });
@@ -1126,28 +1272,23 @@ function initSettings() {
   document.getElementById("pick-add").addEventListener("click", async () => {
     if (!(pickCampus && pickBuilding && pickRoom)) return;
     const t = {
-      feeitemid: 409, appId: 34,
+      feeitemid: state.defaults.feeitemid, appId: state.defaults.appId,
       campus: pickCampus.value, building: pickBuilding.value, room: pickRoom.value,
       label: document.getElementById("pick-tag").value.trim() || `${pickCampus.name}/${pickBuilding.name}/${pickRoom.name}`,
     };
-    if (draftTargets.some(x => matchRoom(x, t))) {
-      document.getElementById("pick-preview").textContent = "该宿舍已在列表中,将更新 tag";
-    }
+    const replacing = draftTargets.some(existing => matchRoom(existing, t));
     const addBtn = document.getElementById("pick-add");
     addBtn.disabled = true;
     try {
-      const res = await fetch("/api/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+      const body = await responseJSON(await adminFetch("/api/config", {
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ target: t }),
-      });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+      }));
       state.targets = body.targets || [];
       draftTargets = state.targets.map(x => ({ ...x }));
       renderTargetList();
-      document.getElementById("pick-preview").textContent = "已自动保存";
-      refresh();
+      document.getElementById("pick-preview").textContent = replacing ? "已更新宿舍 tag" : "已添加并自动保存";
+      await refresh();
     } catch (e) {
       document.getElementById("pick-preview").textContent = "保存失败: " + e.message;
     } finally {
@@ -1155,7 +1296,6 @@ function initSettings() {
       fillSelect(selR, [], "— 选择房间 —", true);
       pickBuilding = pickRoom = null;
       document.getElementById("pick-tag").value = "";
-      updatePreview();
     }
   });
 }
@@ -1188,8 +1328,22 @@ function collectTarget() {
 }
 
 function collectAllProgress(d) {
-  document.getElementById("collect-cancel-btn").hidden = false;
   const btn = document.getElementById("collect-btn");
+  const cancel = document.getElementById("collect-cancel-btn");
+  if (["done", "failed", "cancelled"].includes(d.state)) {
+    if (!activeJobId || d.job_id === activeJobId) setActiveJobId("");
+    cancel.hidden = true;
+    resetCollectButton(btn, "⚡ 立即采集");
+    return;
+  }
+  if (d.state === "cancelling") {
+    cancel.hidden = true;
+    btn.disabled = true;
+    btn.classList.add("busy");
+    btn.textContent = "正在取消…";
+    return;
+  }
+  cancel.hidden = false;
   const total = d.requested || 0;
   const done = d.completed || 0;
   const pct = Math.max(0, Math.min(100, Number(d.percent ?? (total ? done * 100 / total : 0))));
@@ -1199,7 +1353,6 @@ function collectAllProgress(d) {
   if (d.current && d.current.label) btn.title = `正在采集: ${d.current.label}`;
 }
 
-  document.getElementById("collect-cancel-btn").hidden = true;
 function resetCollectButton(btn, text) {
   btn.disabled = false;
   btn.classList.remove("busy");
@@ -1210,35 +1363,46 @@ function resetCollectButton(btn, text) {
 
 async function pollCollectAll(jobId, btn, oldText) {
   while (true) {
-    const res = await fetch(`/api/collect-all/status?job_id=${encodeURIComponent(jobId)}`, { cache: "no-store" });
-    const d = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
+    const d = await responseJSON(await adminFetch(`/api/collect-all/status?job_id=${encodeURIComponent(jobId)}`));
     collectAllProgress(d);
-    if (d.state === "done" || d.state === "failed") return d;
+    if (["done", "failed", "cancelled"].includes(d.state)) return d;
     await new Promise(resolve => setTimeout(resolve, 800));
   }
 }
 
 async function collectAllWithProgress(btn, oldText) {
-  const start = await fetch("/api/collect-all", {
+  const job = await responseJSON(await adminFetch("/api/collect-all", {
     method: "POST", headers: { "Content-Type": "application/json" },
-  });
-  const job = await start.json().catch(() => ({}));
-  if (!start.ok) throw new Error(job.error || `HTTP ${start.status}`);
+  }));
+  setActiveJobId(job.job_id);
   const result = await pollCollectAll(job.job_id, btn, oldText);
+  if (result.state === "cancelled") {
+    toast(`采集已取消，已完成 ${result.completed || 0}/${result.requested || 0}`);
+    await refresh();
+    return;
+  }
+  if (result.state === "failed") {
+    toast("批量采集失败: " + (result.error || "未知错误"), true);
+    await refresh();
+    return;
+  }
   const failed = result.failed || (result.results || []).filter(r => r.error).length;
-  const skipped = result.skipped || 0;
-  const all = result.state === "done" && !failed && !skipped && result.success === result.requested;
+  const all = result.state === "done" && !failed && result.success === result.requested;
   const parts = [`成功 ${result.success || 0}/${result.requested || 0}`];
   if (failed) parts.push(`${failed} 间失败`);
-  if (skipped) parts.push(`${skipped} 间跳过(限流)`);
   toast(all ? `已采集全部 ${result.success} 间` : "采集结果: " + parts.join(","), !all);
   await refresh();
 }
 
-function collectNow() {
+async function collectNow() {
   const btn = document.getElementById("collect-btn");
   const old = "⚡ 立即采集";
+  try {
+    if (!await ensureAdmin()) return;
+  } catch (e) {
+    toast("管理鉴权失败: " + e.message, true);
+    return;
+  }
   btn.disabled = true;
   btn.classList.add("busy");
   btn.style.setProperty("--progress", "0%");
@@ -1256,7 +1420,7 @@ function collectNow() {
   const t = collectTarget();
   if (!t) { resetCollectButton(btn, old); return; }
   btn.textContent = "采集中…";
-  fetch("/api/collect", {
+  adminFetch("/api/collect", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ campus: t.campus, building: t.building, room: t.room }),
   })
@@ -1270,23 +1434,48 @@ function collectNow() {
     .finally(() => resetCollectButton(btn, old));
 }
 
+async function resumeCollectJob() {
+  if (!activeJobId || !adminKey) return;
+  const jobId = activeJobId;
+  const btn = document.getElementById("collect-btn");
+  btn.disabled = true;
+  collectAllProgress({ state: "queued", job_id: jobId });
+  try {
+    const result = await pollCollectAll(jobId, btn, "⚡ 立即采集");
+    if (result.state === "cancelled") {
+      toast(`采集已取消，已完成 ${result.completed || 0}/${result.requested || 0}`);
+    } else if (result.state === "failed") {
+      toast("批量采集失败: " + (result.error || "未知错误"), true);
+    } else {
+      toast(`批量采集已完成，成功 ${result.success || 0}/${result.requested || 0}`,
+            !!result.failed);
+    }
+    await refresh();
+  } catch (e) {
+    if (e.status === 404) setActiveJobId("");
+    toast("恢复批量任务状态失败: " + e.message, true);
+  } finally {
+    resetCollectButton(btn, "⚡ 立即采集");
+  }
+}
+
 /* ============ 启动 ============ */
 async function boot() {
   // 先尝试从缓存加载上次数据（离线可用）
   if ('caches' in window) {
     try {
-      const cache = await caches.open('elec-monitor-v1');
-      const cachedConfig = await cache.match('/api/config');
+      const cachedConfig = await caches.match('/api/config');
       if (cachedConfig) {
-        const cfg = await cachedConfig.json();
+      const cfg = await cachedConfig.json();
         if (cfg && cfg.targets) state.targets = cfg.targets;
+        if (cfg && cfg.defaults) state.defaults = cfg.defaults;
       }
-      const cachedReadings = await cache.match('/api/readings');
+      state.room = roomFromPath();
+      const cachedReadings = await caches.match(readingsURL());
       if (cachedReadings) {
         const data = await cachedReadings.json();
         if (data && data.length) {
           state.data = data;
-          state.room = roomFromPath();
           render();
         }
       }
@@ -1295,9 +1484,7 @@ async function boot() {
 
   // 再通过网络获取最新数据
   try {
-    const cfg = await (await fetch('/api/config')).json();
-    if (cfg.error) throw new Error(cfg.error);
-    state.targets = cfg.targets || [];
+    await refreshPublicConfig();
     state.room = roomFromPath();
     await refresh();
   } catch (e) {
@@ -1306,29 +1493,34 @@ async function boot() {
 
   // 连接 SSE 实时推送
   connectSSE();
+  startConfigPolling();
+  resumeCollectJob();
 }
 initTheme();
 initFilters();
 initBackButton();
+initAdminPrompt();
 initSettings();
 document.getElementById("collect-btn").addEventListener("click", collectNow);
 document.getElementById("collect-cancel-btn").addEventListener("click", async function() {
   const btn = document.getElementById("collect-cancel-btn");
   btn.disabled = true;
   try {
-    const res = await fetch("/api/collect-all/cancel", { method: "POST" });
-    const d = await res.json().catch(() => ({}));
-    if (d.ok) toast("已取消采集任务");
-    else toast("取消失败: " + (d.error || "未知错误"), true);
+    if (!await ensureAdmin()) return;
+    if (!activeJobId) throw new Error("当前任务 ID 不可用");
+    const d = await responseJSON(await adminFetch(
+      `/api/collect-all/cancel?job_id=${encodeURIComponent(activeJobId)}`,
+      { method: "POST" },
+    ));
+    if (d.ok) {
+      toast("取消请求已发送，正在等待当前请求退出");
+      collectAllProgress({ state: "cancelling", job_id: activeJobId });
+    }
   } catch (e) {
     toast("取消失败: " + e.message, true);
   } finally {
     btn.disabled = false;
     btn.hidden = true;
-    document.getElementById("collect-btn").disabled = false;
-    document.getElementById("collect-btn").classList.remove("busy");
-    document.getElementById("collect-btn").style.setProperty("--progress", "0%");
-    document.getElementById("collect-btn").textContent = "⚡ 立即采集";
   }
 });
 boot();   // 含 SSE 连接 + 缓存优先加载

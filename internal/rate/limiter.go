@@ -1,82 +1,112 @@
-// Package rate 实现一个线程安全的滑动窗口限流器。
+// Package rate 提供严格按请求间隔放行的线程安全节拍器。
 package rate
 
 import (
+	"context"
 	"sync"
 	"time"
 )
 
-// Limiter 实现滑动窗口限流。
-// 零值 Limiter{} 表示不限流（Allow() 始终返回 true）。
+// Limiter 保证任意两次成功放行之间至少间隔 1 分钟/rate。
+// 所有调用方共享同一实例时，能够按真实上游 HTTP 请求数限速。
 type Limiter struct {
-	mu     sync.Mutex
-	window time.Duration
-	rate   int
-	times  []time.Time
+	waitMu  sync.Mutex
+	mu      sync.RWMutex
+	rate    int
+	last    time.Time
+	changed chan struct{}
 }
 
-// NewLimiter 创建一个新的限流器。
-// ratePerMinute 为每分钟允许的请求次数。<=0 表示不限流。
 func NewLimiter(ratePerMinute int) *Limiter {
-	if ratePerMinute <= 0 {
-		return &Limiter{window: 60 * time.Second, rate: 0, times: make([]time.Time, 0)}
+	return &Limiter{rate: normalizeRate(ratePerMinute), changed: make(chan struct{})}
+}
+
+// Wait 等待到下一个允许发送请求的时刻。取消 context 会立即退出且不消耗额度。
+func (l *Limiter) Wait(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return &Limiter{
-		window: 60 * time.Second,
-		rate:   ratePerMinute,
-		times:  make([]time.Time, 0, ratePerMinute),
+	l.waitMu.Lock()
+	defer l.waitMu.Unlock()
+
+	for {
+		interval := l.Interval()
+		l.mu.RLock()
+		last := l.last
+		changed := l.changed
+		l.mu.RUnlock()
+
+		wait := time.Until(last.Add(interval))
+		if last.IsZero() || wait <= 0 {
+			l.mu.Lock()
+			l.last = time.Now()
+			l.mu.Unlock()
+			return nil
+		}
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+			// 重新读取 rate；等待期间配置可能已热更新。
+			continue
+		case <-changed:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			continue
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		}
 	}
 }
 
-// Allow 尝试消耗一次额度。
-// 返回 true 表示放行（并记账），false 表示超限。
-func (l *Limiter) Allow() bool {
-	if l.rate <= 0 {
-		return true
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	now := time.Now()
-	cutoff := now.Add(-l.window)
-
-	// 移除窗口外的老记录
-	i := 0
-	for i < len(l.times) && l.times[i].Before(cutoff) {
-		i++
-	}
-	l.times = l.times[i:]
-
-	// 检查是否超限
-	if len(l.times) >= l.rate {
-		return false
-	}
-
-	l.times = append(l.times, now)
-	return true
-}
-
-// SetRate 动态调整限流速率。
+// SetRate 动态更新每分钟请求数，下一次放行立即使用新间隔。
 func (l *Limiter) SetRate(ratePerMinute int) {
+	normalized := normalizeRate(ratePerMinute)
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.rate = ratePerMinute
-	// 如果速率调低，清理多余的记录
-	if ratePerMinute > 0 && len(l.times) > ratePerMinute {
-		l.times = l.times[len(l.times)-ratePerMinute:]
+	if l.rate == normalized {
+		l.mu.Unlock()
+		return
 	}
+	l.rate = normalized
+	close(l.changed)
+	l.changed = make(chan struct{})
+	l.mu.Unlock()
 }
 
-// Rate 返回当前限流速率。
 func (l *Limiter) Rate() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	return l.rate
 }
 
-// Reset 清空限流记录。
+func (l *Limiter) Interval() time.Duration {
+	rate := l.Rate()
+	divisor := time.Duration(rate)
+	return (time.Minute + divisor - 1) / divisor
+}
+
+// Reset 仅用于测试或显式重新开始节拍。
 func (l *Limiter) Reset() {
+	l.waitMu.Lock()
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.times = l.times[:0]
+	l.last = time.Time{}
+	l.mu.Unlock()
+	l.waitMu.Unlock()
+}
+
+func normalizeRate(rate int) int {
+	if rate <= 0 {
+		return 1
+	}
+	return rate
 }

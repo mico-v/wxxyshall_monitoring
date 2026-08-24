@@ -3,7 +3,6 @@ package config
 import (
 	"embed"
 	"os"
-	"path/filepath"
 )
 
 //go:embed config.example.json
@@ -14,6 +13,8 @@ func GenerateDefaultConfig() error {
 	path := ConfigPath()
 	if _, err := os.Stat(path); err == nil {
 		return nil // 已存在
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 
 	data, err := exampleConfig.ReadFile("config.example.json")
@@ -21,10 +22,5 @@ func GenerateDefaultConfig() error {
 		return err
 	}
 
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
-	return os.WriteFile(path, data, 0644)
+	return writeFileAtomic(path, data, 0640)
 }

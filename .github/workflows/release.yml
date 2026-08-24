@@ -1,6 +1,6 @@
 # 宿舍电费监控 — GitHub Actions 流水线
 #
-# 触发: 推送到 main 时编译二进制; 创建 tag 时发布到 Release
+# 触发: 推送到 main 时编译 Linux 二进制; 创建 tag 时发布到 Release
 name: build-and-release
 
 on:
@@ -14,18 +14,31 @@ env:
   GO_VERSION: '1.27'
 
 jobs:
+  quality:
+    name: 测试与静态检查
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: go test ./...
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: node --check internal/web/static/sw.js
+      - run: python3 -m py_compile login.py
+
   build:
     name: 编译二进制
     runs-on: ubuntu-latest
+    needs: [quality]
     permissions:
       contents: read
     strategy:
       matrix:
-        goos: [linux, darwin, windows]
-        goarch: [amd64]
-        include:
-          - goos: linux
-            goarch: arm64
+        goarch: [amd64, arm64]
 
     steps:
       - uses: actions/checkout@v4
@@ -39,12 +52,12 @@ jobs:
       - name: 编译
         run: |
           mkdir -p dist
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
-            go build -ldflags="-s -w" -o dist/elec-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/elec/
+          GOOS=linux GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
+            go build -ldflags="-s -w" -o dist/elec-linux-${{ matrix.goarch }} ./cmd/elec/
 
       - uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: binaries-linux-${{ matrix.goarch }}
           path: dist/
           retention-days: 7
 
@@ -65,11 +78,10 @@ jobs:
       - name: 打包
         run: |
           mkdir -p release
-          mv elec-windows-amd64 elec-windows-amd64.exe 2>/dev/null || true
           gzip -c elec-linux-amd64 > release/elec-linux-amd64.gz
           gzip -c elec-linux-arm64 > release/elec-linux-arm64.gz
-          gzip -c elec-darwin-amd64 > release/elec-darwin-amd64.gz
-          zip release/elec-windows-amd64.zip elec-windows-amd64.exe 2>/dev/null || true
+          cd release
+          sha256sum elec-linux-*.gz > SHA256SUMS
 
       - uses: softprops/action-gh-release@v2
         with:

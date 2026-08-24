@@ -72,9 +72,3 @@ func (s *Server) embeddedFileServer() http.Handler {
 func readEmbeddedFile(name string) ([]byte, error) {
 	return fs.ReadFile(staticFS, name)
 }
-
-// embeddedFileExists 检查嵌入文件系统中是否存在文件。
-func embeddedFileExists(name string) bool {
-	_, err := fs.Stat(staticFS, name)
-	return err == nil
-}

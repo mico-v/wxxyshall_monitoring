@@ -1,217 +1,194 @@
 # 宿舍电费监控
 
-苏州科技大学校园平台宿舍电费监控系统。
+苏州科技大学宿舍电费余额采集与展示工具。单个 Go 二进制同时提供定时采集、SQLite 历史记录、网页仪表盘、SSE 实时读数和 PWA；`login.py` 负责在本地浏览器中获取 token。
 
-自动登录账号，定时查询宿舍电费余额，记录到 SQLite，网页展示曲线。支持多宿舍监控、SSE 实时推送、PWA 可安装。
+服务端正式支持 Linux amd64/arm64；安装器面向 systemd。`login.py` 可在装有 Python、Playwright 和 Chrome/Edge 的桌面系统运行。
 
-## 功能
+## 主要功能
 
-| 功能 | 说明 |
-|---|---|
-| 自动采集 | 定时循环采集电费余额，写入 SQLite（WAL 模式） |
-| 网页仪表盘 | 纯 SPA 前端，显示剩余电量曲线、读数明细、KPI 卡片 |
-| SSE 实时推送 | 采集完成后页面自动更新，无需手动刷新 |
-| 批量采集 | 一次采集所有监控宿舍，实时进度推送，可取消 |
-| 多宿舍管理 | 每间宿舍独立 URL `/room/校区/楼栋/房间`，可收藏/分享 |
-| 级联发现 | 网页端级联选择校区→楼栋→房间，自动添加监控目标 |
-| 轻量图表 | 内建 Canvas 渲染，平滑曲线 + 渐变填充 + hover tooltip，无外部依赖 |
-| 限流保护 | 滑动窗口限流器，保护学校 WAF |
-| 浅/深色主题 | 跟随系统或手动切换，持久化到 localStorage |
-| PWA 可安装 | 支持添加到桌面，Service Worker 离线回退 |
-| 结构化日志 | log/slog，可配合 journald 直接查看 |
-| 自安装 | `elec install` 自动注册 systemd 服务 + 定时器 |
-| 自动更新 | `elec update` 检查 GitHub Release 并更新二进制 |
-| CLI 工具集 | `elec status`、`elec logs`、`elec token`、`elec config`、`elec collect` |
+- 定时或手动采集多个宿舍，结果写入 SQLite WAL 数据库。
+- 学校接口的每一次真实 HTTP 尝试（包括重试）都严格间隔 `1 分钟 / rate_limit_per_minute`。
+- 批量采集可查看进度并真正取消正在等待或请求中的任务。
+- 校区、楼栋和房间发现结果按查询参数缓存在进程内；首次查询仍严格限流，后续访问直接读取内存，相同的并发首次查询只请求学校接口一次。
+- 配置和 token 支持安全热重载；采集间隔、限流和目标顺序无需重启，已打开的仪表盘会在 30 秒内同步公开目标配置，端口变化需重启。
+- 历史文件不自动清理；查询接口只返回符合条件的最新 10,000 条，按时间正序展示。
+- 仪表盘按 `config.json` 中的目标顺序显示和采集。网页“查询设置”只提供级联添加宿舍；其他字段、排序和已有宿舍调整统一手工编辑 `config.json`。
+- PWA 可安装，离线时使用最近缓存的公开配置和读数；管理请求和带鉴权请求绝不缓存。
+- 所有修改、采集、发现、任务状态/取消和 token 推送接口都需要管理密钥。
+
+项目没有自动更新功能。升级由管理员替换二进制并重启服务完成。
 
 ## 快速开始
 
-### 1. 获取 token（约 70 天一次）
+### 获取 token
+
+本机需要 Python 3、Playwright 和 Chrome/Edge：
 
 ```bash
-# 需要本地有 Python 3 + Playwright，且能弹出浏览器
-pip install playwright
+pip install playwright requests
 playwright install chromium
 
-# 仅保存本地
+# 默认保存到当前目录 token.json；设置 ELEc_DIR 后保存到 ELEc_DIR/data/token.json
 python3 login.py
 
-# 保存本地并推送到远程服务器
-ADMIN_KEY=<key> python3 login.py --push http://服务器IP:8080
+# 只推送到服务器，不在本地保存
+ADMIN_KEY='<管理密钥>' python3 login.py \
+  --push https://elec.example.edu.cn --push-only
+
+# 也可从文件读取密钥，避免出现在 shell 历史和进程环境中
+python3 login.py --push https://elec.example.edu.cn --push-only \
+  --admin-key-file /opt/elec/data/.admin_key
 ```
 
-浏览器会自动弹出，学号已预填，手动点击密码（安全键盘）→ 点登录即可。脚本自动捕获 token 保存到本地 `token.json`，如果指定了 `--push` 还会推送到远程服务器。
+可用参数：
 
-### 2. 编译
+- `--output PATH`：指定本地 `token.json` 路径。
+- `--browser PATH`：指定浏览器可执行文件。
+- `--admin-key-file PATH`：从文件读取推送所需管理密钥。
+- `--storage-state PATH`：显式保存包含敏感登录态的浏览器状态；默认不保存。
+- `--push URL --push-only`：只向远程服务推送 token。
+
+### 编译和本地运行
 
 ```bash
-go mod tidy
-go build -o elec ./cmd/elec/
-```
+go build -o elec ./cmd/elec
 
-### 3. 本地运行
-
-```bash
-# 单次采集测试
-./elec collect
-
-# 启动服务（webapp + 定时采集循环）
+# ELEc_DIR 指安装根目录，数据实际位于其 data/ 子目录
+export ELEc_DIR="$PWD/.local-elec"
 ./elec run
-# 打开 http://localhost:8080
 ```
 
-### 4. 服务器部署（自安装）
+首次运行会生成 `$ELEc_DIR/data/config.json` 和 `$ELEc_DIR/data/.admin_key`。打开 `http://localhost:8080`，进入“查询设置”时输入管理密钥，即可级联选择并添加宿舍。
+
+### systemd 安装
 
 ```bash
-# 将编译好的二进制传到服务器，然后：
 sudo ./elec install
 ```
 
-`elec install` 会做以下事情：
+安装器会：
 
-- 复制自身到 `/opt/elec/elec`
-- 生成默认配置 `/opt/elec/data/config.json`
-- 生成随机管理密钥 `/opt/elec/data/.admin_key`
-- 注册 systemd 服务 `elec.service`（开机自启 + 崩溃自动重启）
-- 创建定时采集 timer `elec-collect.timer`（每 60 分钟自动采集一次）
+- 复制二进制到 `/opt/elec/elec`；
+- 创建无登录权限的 `elec` 系统用户；
+- 创建权限受限的 `/opt/elec/data`、`config.json` 和 `.admin_key`；
+- 注册经过 `NoNewPrivileges`、`ProtectSystem`、能力清空等限制的 `elec.service`；
+- 启用并重启服务。
 
-完成后：
+定时采集由进程内循环按配置执行，不创建额外 systemd timer。
 
 ```bash
-systemctl start elec         # 启动服务
-elec status                  # 查看状态
-elec logs                    # 查看实时日志
-elec collect                 # 立即采集一次
-elec update                  # 检查更新
-elec token                   # 查看 token 状态
-elec config                  # 查看配置信息
-
-# 查看 ADMIN_KEY（推送 token 时用）
-cat /opt/elec/data/.admin_key
-
-# 推送 token 到服务器（约 70 天一次，在本地机器执行）
-ADMIN_KEY=<key> python3 login.py --push http://服务器IP:8080
+elec status
+elec logs
+elec collect
+elec token
+elec config       # 显示密钥文件位置，不直接打印密钥
 ```
 
-### 5. 配置
+## 配置
 
-编辑 `config.json`（数据目录下）：
+完整 `config.json`：
 
 ```json
 {
   "username": "学号",
-  "targets": [],
+  "port": 8080,
+  "base_url": "https://wxxyshall.usts.edu.cn",
+  "targets": [
+    {
+      "feeitemid": 409,
+      "appId": 34,
+      "campus": "校区接口值",
+      "building": "楼栋接口值",
+      "room": "房间接口值",
+      "label": "宿舍显示名称"
+    }
+  ],
   "poll_interval_minutes": 60,
-  "rate_limit_per_minute": 30,
-  "base_url": "https://wxxyshall.usts.edu.cn"
+  "rate_limit_per_minute": 30
 }
 ```
 
-也可以通过网页「查询设置」→ 级联选择校区/楼栋/房间来添加监控宿舍。
+约束：
 
-> **注意**：`rate_limit_per_minute` 只能手改 config.json，网页改不掉。
+- `username` 非空；`port` 为 `1024..65535`，与默认无特权 systemd 服务保持一致。
+- `base_url` 必须是有效的 HTTP/HTTPS 地址。
+- `poll_interval_minutes` 为 `1..10080`。
+- `rate_limit_per_minute` 为 `1..600`。例如 `30` 表示任意两次学校 HTTP 请求至少间隔 2 秒，并非一分钟突发 30 次。
+- 每个目标的 `feeitemid`、`appId` 必须为正整数，`campus/building/room` 非空且组合不可重复。
+- `targets` 数组顺序就是仪表盘和批量采集顺序。
 
-## CLI 命令参考
+网页“查询设置”仅显示已有宿舍，并允许通过校区→楼栋→房间级联添加宿舍；添加后自动保存。网页不编辑服务字段、目标字段和顺序，也不提供删除操作。需要修改、排序或删除时由管理员直接编辑 `config.json`，保存后会热重载。systemd 安装环境中请保持文件归属 `elec:elec`、权限 `0640`，数据目录不允许符号链接或特殊文件。
 
-| 命令 | 说明 |
-|---|---|
-| `elec` / `elec run` | 启动服务（webapp + 采集循环） |
-| `elec install` | 自安装到 `/opt/elec/` + 注册 systemd |
-| `elec collect` | 单次采集所有监控宿舍 |
-| `elec status` | 查看 systemd 服务状态 |
-| `elec logs` | 查看实时日志（journalctl -f） |
-| `elec update` | 检查 GitHub Release 并更新 |
-| `elec token` | 查看 token 状态和有效期 |
-| `elec config` | 查看安装路径、配置信息 |
-| `elec help` | 显示帮助 |
+## 安全边界
 
-## API 路由
+- 管理密钥存放于数据目录的 `.admin_key`，服务启动时读取；不会写入 `config.json` 或 systemd unit。
+- 浏览器只把密钥放在 `sessionStorage`，关闭标签页后失效。公开仪表盘、读数和读数 SSE 不需要密钥。
+- 管理 API 使用 `Authorization: Bearer <key>`。生产部署建议放在 HTTPS 反向代理后，避免明文 HTTP 传输密钥和 token。
+- JSON 请求限制为 1 MiB、拒绝未知字段和多余 JSON；配置、token 使用临时文件 + `fsync` + 原子替换保存。
+- 默认安装服务不以 root 运行，数据目录及敏感文件采用受限权限。
+- 历史记录没有删除 API 或自动清理任务；请自行备份整个数据目录。
+
+## API
+
+公开只读接口：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/` | 仪表盘 SPA |
-| GET | `/room/{campus}/{building}/{room}` | 单宿舍独立界面 |
-| GET | `/api/events` | SSE 实时推送 |
-| GET | `/api/readings?days&campus&building&room` | 读数 JSON |
-| GET/POST | `/api/config` | 读/改配置 |
-| POST | `/api/collect` | 立即采集单间 |
-| POST | `/api/collect-all` | 批量采集全部 |
-| GET | `/api/collect-all/status?job_id=` | 采集进度 |
-| POST | `/api/collect-all/cancel` | 取消批量采集 |
-| GET | `/api/campuses|buildings|rooms` | 发现接口 |
-| POST | `/api/token` | 推送 token（ADMIN_KEY 保护） |
-| GET | `/api/health` | 健康检查 |
+| GET | `/`, `/room/{campus}/{building}/{room}` | 仪表盘 |
+| GET | `/api/health` | 服务和数据库健康状态 |
+| GET | `/api/readings?days&campus&building&room` | 最新最多 10,000 条读数 |
+| GET | `/api/config` | 目标顺序、默认 fee item/app ID；不暴露服务敏感配置 |
+| GET | `/api/events` | 新读数 SSE |
 
-## 项目结构
+需要 Bearer 管理密钥：
 
-```
-├── cmd/
-│   ├── elec/main.go              # 主入口：CLI + HTTP 服务器 + 采集循环
-│   └── tools/                    # CLI 辅助工具
-│       ├── discover/             # 列出校区/楼栋/房间
-│       ├── query/                # 直接查询任意房间电费
-│       ├── report/               # 查看电费历史记录
-│       └── token_status/         # 查看 token 状态
-├── internal/
-│   ├── config/                   # 配置/token 读写 + 嵌入默认配置
-│   ├── charge/                   # 学校电费 API 反向封装
-│   ├── auth/                     # Token 过期检查
-│   ├── db/                       # SQLite 操作（WAL 模式）
-│   ├── web/                      # HTTP 路由 + SSE 推送 + 嵌入静态文件
-│   │   └── static/               # 前端文件（唯一源，嵌入到二进制）
-│   └── rate/                     # 滑动窗口限流器
-├── login.py                      # 浏览器登录（Playwright）
-└── .github/workflows/release.yml # CI/CD
-```
-
-所有前端文件（webapp.html、sw.js、manifest.json、404.html、offline.html、PWA 图标）通过 `//go:embed` 嵌入到二进制中，部署只需一个二进制文件，无需额外复制静态文件。
-
-## 架构
-
-```
-用户浏览器 ──→ elec (:8080) ──→ SQLite (electricity.db)
-                 │
-                 ├── SSE 实时推送 (GET /api/events)
-                 ├── 学校 API (wxxyshall.usts.edu.cn)
-                 └── 静态文件 (嵌入到二进制)
-```
-
-- **login.py**（本地运行，~70 天一次）：弹浏览器 → 登录 → 捕获 token → 保存本地 → 可选推送到服务器
-- **elec**（单二进制）：定时采集 + HTTP 仪表盘，按 `(feeitemid, appId)` 复用会话，查余额写入 SQLite，Go 标准库 `net/http`，SSE 实时推送，限流保护学校 API
-
-## 前端特性
-
-- **SSE 实时推送**：采集完成后页面自动更新，无需手动刷新
-- **PWA 可安装**：支持添加到桌面，类原生应用体验
-- **Service Worker 缓存**：离线时显示上次缓存数据
-- **每间宿舍独立 URL**：`/room/<校区>/<楼栋>/<房间>`，可收藏/分享
-- **浅/深色主题**：跟随系统或手动切换，持久化到 localStorage
-- **轻量 Canvas 图表**：平滑曲线、渐变填充、hover tooltip、端标签、自适应小数位
-- **多宿舍视图**：KPI 卡片 + mini 趋势图，点击放大查看单间详情
-- **采集进度**：批量采集时实时显示进度百分比，可取消
-- **响应式设计**：桌面、平板、手机端自适应布局
-
-## 关键约定
-
-- **token 约 70 天过期**，服务端续期不可用，到期需重新 `login.py` + `push_token`
-- **`rate_limit_per_minute`** 保护学校 WAF，只能手改 config.json
-- **数据库**：SQLite，WAL 模式，支持并发读写
-
-## 开发
-
-```bash
-go mod tidy
-go build ./...
-go vet ./...
-go test ./...
-```
-
-## 环境变量
-
-| 变量 | 默认值 | 说明 |
+| 方法 | 路径 | 说明 |
 |---|---|---|
-| `ELEc_DIR` | `/opt/elec` | 数据目录（config.json、token.json、electricity.db 都在其下） |
-| `ADMIN_KEY` | 自动生成 | 管理密钥，用于 token 推送鉴权 |
+| GET/POST | `/api/config` | 鉴权 GET 返回完整配置；POST 更新完整或部分字段 |
+| POST | `/api/collect` | 采集一间已配置宿舍 |
+| POST | `/api/collect-all` | 启动批量采集 |
+| GET | `/api/collect-all/status?job_id=...` | 查询任务快照 |
+| POST | `/api/collect-all/cancel?job_id=...` | 取消 ID 精确匹配的当前批量任务 |
+| GET | `/api/campuses`, `/api/buildings`, `/api/rooms` | 级联发现，支持 `feeitemid` 和 `appId` |
+| POST | `/api/token` | 推送 token |
+| POST | `/api/admin/verify` | 校验管理密钥 |
+
+接口字段约定：
+
+- `POST /api/config` 接受配置章节列出的六个顶层字段并支持部分更新；网页添加宿舍时也可单独提交 `{"target": {...}}`。新宿舍追加到列表末尾；重复宿舍只原位更新 `label`，保留其 `feeitemid`、`appId` 和顺序，不覆盖其他配置。`target` 不能与其他配置字段混用；未知字段或无效范围会返回 `400`。
+- `POST /api/collect` 请求体为 `{"campus":"...","building":"...","room":"..."}`；三个字段必须同时提供且目标必须已配置。空对象表示采集配置第一项。
+- 发现接口使用查询参数 `feeitemid`、`appId`；楼栋接口另需 `campus`，房间接口另需 `campus`、`building`。成功结果按 `base_url + feeitemid + appId + 层级参数` 缓存到当前进程，直到服务重启；错误不缓存，`base_url` 变化会使用新的缓存键。
+- 批量任务状态为 `queued`、`running`、`cancelling`、`cancelled`、`done` 或 `failed`。运行中状态只返回进度计数，终态返回完整 `results`；取消必须传启动接口返回的同一个 `job_id`。
+- `POST /api/token` 接受 `access_token`、可选 `refresh_token`、`expires_in`、`login_time`、`sno` 和 `source`，拒绝未知字段及过大的 token。
+
+## 数据与 PWA
+
+- SQLite 文件：`$ELEc_DIR/data/electricity.db`，包含全部历史；接口限制不删除数据库记录。
+- Service Worker 只缓存同源公开 GET 请求。写请求、带 `Authorization` 的请求和 SSE 永不缓存。
+- 导航采用网络优先并回退到应用壳；公开 API 采用网络优先并回退到完全匹配（包括查询参数）的缓存。
+- PWA manifest 使用 192/512 PNG maskable 图标。
+
+## 开发验证
 
 ```bash
-ELEc_DIR=/path/to/data ./elec run
+GOCACHE=/tmp/wxxyshall-go-cache go test ./...
+GOCACHE=/tmp/wxxyshall-go-cache go vet ./...
+GOCACHE=/tmp/wxxyshall-go-cache go build ./...
+GOCACHE=/tmp/wxxyshall-go-cache go test -race ./...
+
+node --check internal/web/static/sw.js
+python3 -m py_compile login.py
+```
+
+项目结构：
+
+```text
+cmd/elec/          CLI、安装器、HTTP 服务和定时循环
+internal/collector 统一定时/单间/批量采集与并发边界
+internal/charge/   学校接口客户端及错误处理
+internal/config/   配置/token 原子读写和热重载
+internal/db/       SQLite 历史记录
+internal/rate/     严格请求间隔器
+internal/web/      API、SSE、嵌入式前端和 PWA
+login.py           本地浏览器登录与 token 推送
 ```

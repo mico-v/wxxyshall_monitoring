@@ -1,132 +1,138 @@
 package rate
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"testing"
+	"time"
 )
 
-func TestNewLimiter(t *testing.T) {
-	l := NewLimiter(10)
-	if l == nil {
-		t.Fatal("expected non-nil")
-	}
-	if l.rate != 10 {
-		t.Fatalf("expected rate 10, got %d", l.rate)
+func TestNewLimiterNormalizesRate(t *testing.T) {
+	for _, rate := range []int{0, -1} {
+		l := NewLimiter(rate)
+		if got := l.Rate(); got != 1 {
+			t.Fatalf("NewLimiter(%d).Rate() = %d, want 1", rate, got)
+		}
 	}
 }
 
-func TestLimiterAllow(t *testing.T) {
-	t.Run("zero rate means unlimited", func(t *testing.T) {
-		l := NewLimiter(0)
-		for i := 0; i < 100; i++ {
-			if !l.Allow() {
-				t.Fatal("zero rate should always allow")
-			}
-		}
-	})
-
-	t.Run("negative rate means unlimited", func(t *testing.T) {
-		l := NewLimiter(-1)
-		if !l.Allow() {
-			t.Fatal("negative rate should always allow")
-		}
-	})
-
-	t.Run("honors rate limit", func(t *testing.T) {
-		l := NewLimiter(5)
-		// 5 requests should be allowed
-		for i := 0; i < 5; i++ {
-			if !l.Allow() {
-				t.Fatalf("request %d should be allowed", i)
-			}
-		}
-		// 6th should be denied
-		if l.Allow() {
-			t.Fatal("6th request should be denied")
-		}
-	})
-
-	t.Run("refills after window", func(t *testing.T) {
-		l := NewLimiter(1)
-		if !l.Allow() {
-			t.Fatal("first request should be allowed")
-		}
-		if l.Allow() {
-			t.Fatal("second request should be denied")
-		}
-		// Set times to be empty (simulate time passing)
-		l.mu.Lock()
-		l.times = l.times[:0]
-		l.mu.Unlock()
-		if !l.Allow() {
-			t.Fatal("after reset, request should be allowed")
-		}
-	})
+func TestIntervalRoundsUp(t *testing.T) {
+	l := NewLimiter(7)
+	if got := l.Interval() * 7; got < time.Minute {
+		t.Fatalf("7 intervals total %v, want at least one minute", got)
+	}
 }
 
-func TestLimiterConcurrent(t *testing.T) {
-	l := NewLimiter(50)
-	var wg sync.WaitGroup
-	allowed := 0
+func TestLimiterWaitStrictSpacing(t *testing.T) {
+	l := NewLimiter(6000) // 10ms
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	var times []time.Time
+	for i := 0; i < 3; i++ {
+		if err := l.Wait(ctx); err != nil {
+			t.Fatalf("Wait(%d): %v", i, err)
+		}
+		times = append(times, time.Now())
+	}
+	for i := 1; i < len(times); i++ {
+		if gap := times[i].Sub(times[i-1]); gap < 9*time.Millisecond {
+			t.Fatalf("gap %d = %v, want at least 9ms", i, gap)
+		}
+	}
+}
+
+func TestLimiterConcurrentWaitsAreSerialized(t *testing.T) {
+	l := NewLimiter(6000) // 10ms
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	const workers = 4
+	times := make([]time.Time, 0, workers)
 	var mu sync.Mutex
-
-	for i := 0; i < 100; i++ {
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if l.Allow() {
-				mu.Lock()
-				allowed++
-				mu.Unlock()
+			if err := l.Wait(ctx); err != nil {
+				t.Errorf("Wait: %v", err)
+				return
 			}
+			mu.Lock()
+			times = append(times, time.Now())
+			mu.Unlock()
 		}()
 	}
 	wg.Wait()
-
-	mu.Lock()
-	if allowed > 50 {
-		t.Fatalf("expected at most 50 allowed, got %d", allowed)
+	if len(times) != workers {
+		t.Fatalf("got %d successful waits, want %d", len(times), workers)
 	}
-	mu.Unlock()
-}
-
-func TestSetRate(t *testing.T) {
-	l := NewLimiter(5)
-	for i := 0; i < 5; i++ {
-		l.Allow()
-	}
-	l.SetRate(10)
-	// After raising rate, more requests should be allowed
-	for i := 0; i < 5; i++ {
-		if !l.Allow() {
-			t.Fatalf("after raising rate, request %d should be allowed", i)
+	for i := 1; i < len(times); i++ {
+		if gap := times[i].Sub(times[i-1]); gap < 9*time.Millisecond {
+			t.Fatalf("concurrent gap %d = %v, want at least 9ms", i, gap)
 		}
 	}
 }
 
-func TestReset(t *testing.T) {
-	l := NewLimiter(3)
-	for i := 0; i < 3; i++ {
-		l.Allow()
+func TestLimiterWaitCancellationDoesNotConsumeSlot(t *testing.T) {
+	l := NewLimiter(1)
+	if err := l.Wait(context.Background()); err != nil {
+		t.Fatal(err)
 	}
-	if l.Allow() {
-		t.Fatal("should be denied")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := l.Wait(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Wait error = %v, want deadline exceeded", err)
+	}
+
+	l.Reset()
+	start := time.Now()
+	if err := l.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 20*time.Millisecond {
+		t.Fatalf("first wait after reset took %v", elapsed)
+	}
+}
+
+func TestSetRateWakesWaiter(t *testing.T) {
+	l := NewLimiter(1)
+	if err := l.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- l.Wait(context.Background()) }()
+	time.Sleep(10 * time.Millisecond)
+	l.SetRate(6000)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("waiter was not woken after rate update")
+	}
+	if got := l.Rate(); got != 6000 {
+		t.Fatalf("Rate() = %d, want 6000", got)
+	}
+}
+
+func TestResetAllowsImmediateWait(t *testing.T) {
+	l := NewLimiter(1)
+	if err := l.Wait(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 	l.Reset()
-	for i := 0; i < 3; i++ {
-		if !l.Allow() {
-			t.Fatalf("after reset, request %d should be allowed", i)
-		}
+	start := time.Now()
+	if err := l.Wait(context.Background()); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestRate(t *testing.T) {
-	l := NewLimiter(42)
-	if l.Rate() != 42 {
-		t.Fatalf("expected rate 42, got %d", l.Rate())
-	}
-	l.SetRate(10)
-	if l.Rate() != 10 {
-		t.Fatalf("expected rate 10, got %d", l.Rate())
+	if elapsed := time.Since(start); elapsed > 20*time.Millisecond {
+		t.Fatalf("Wait after Reset took %v", elapsed)
 	}
 }
