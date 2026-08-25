@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -25,12 +26,26 @@ const (
 
 // Target 代表一个监控宿舍目标。
 type Target struct {
-	FeeItemID int    `json:"feeitemid"`
-	AppID     int    `json:"appId"`
-	Campus    string `json:"campus"`
-	Building  string `json:"building"`
-	Room      string `json:"room"`
-	Label     string `json:"label"`
+	FeeItemID       int    `json:"feeitemid"`
+	AppID           int    `json:"appId"`
+	Campus          string `json:"campus"`
+	Building        string `json:"building"`
+	Room            string `json:"room"`
+	Label           string `json:"label"`
+	ShowInWeb       *bool  `json:"show_in_web,omitempty"`
+	PollIntervalMin *int   `json:"poll_interval_minutes,omitempty"`
+}
+
+// IsShownInWeb reports whether this target is included in public web views.
+func (t Target) IsShownInWeb() bool { return t.ShowInWeb == nil || *t.ShowInWeb }
+
+// PollInterval returns the target override or the global interval.
+func (t Target) PollInterval(global int) time.Duration {
+	minutes := global
+	if t.PollIntervalMin != nil && *t.PollIntervalMin > 0 {
+		minutes = *t.PollIntervalMin
+	}
+	return time.Duration(minutes) * time.Minute
 }
 
 // Key 返回宿舍的稳定身份标识（不含 label）。
@@ -63,6 +78,16 @@ func (c *Config) Clone() *Config {
 	}
 	cp := *c
 	cp.Targets = append([]Target(nil), c.Targets...)
+	for i := range cp.Targets {
+		if c.Targets[i].ShowInWeb != nil {
+			value := *c.Targets[i].ShowInWeb
+			cp.Targets[i].ShowInWeb = &value
+		}
+		if c.Targets[i].PollIntervalMin != nil {
+			value := *c.Targets[i].PollIntervalMin
+			cp.Targets[i].PollIntervalMin = &value
+		}
+	}
 	return &cp
 }
 
@@ -72,6 +97,23 @@ func (c *Config) GetTargets() []Target {
 		return nil
 	}
 	return append([]Target(nil), c.Targets...)
+}
+
+// GetWebTargets returns only targets enabled for public web display.
+func (c *Config) GetWebTargets() []Target {
+	if c == nil || len(c.Targets) == 0 {
+		return nil
+	}
+	targets := make([]Target, 0, len(c.Targets))
+	for _, target := range c.Targets {
+		if target.IsShownInWeb() {
+			targets = append(targets, target)
+		}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	return targets
 }
 
 // DataDir 返回数据目录路径。
@@ -262,6 +304,9 @@ func ValidateConfig(cfg *Config) error {
 		}
 		if len(target.Campus) > 128 || len(target.Building) > 128 || len(target.Room) > 128 || len(target.Label) > 128 {
 			return fmt.Errorf("targets[%d] 的字段过长", i)
+		}
+		if target.PollIntervalMin != nil && (*target.PollIntervalMin < 1 || *target.PollIntervalMin > 7*24*60) {
+			return fmt.Errorf("targets[%d] 的 poll_interval_minutes 必须在 1..10080 之间", i)
 		}
 		if _, ok := seen[target.Key()]; ok {
 			return fmt.Errorf("targets[%d] 与前面的宿舍重复: %s", i, target.Key())

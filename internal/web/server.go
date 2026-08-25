@@ -75,7 +75,9 @@ func NewServer(hub *config.Hub, dbPath, adminKey, rootDir string) (*Server, erro
 		cancel:    cancel,
 	}
 	s.collector.SetReadingHandler(func(event collector.ReadingEvent) {
-		s.hub.Broadcast("reading", readingEvent(event))
+		if event.Target.IsShownInWeb() {
+			s.hub.Broadcast("reading", readingEvent(event))
+		}
 	})
 
 	return s, nil
@@ -134,7 +136,7 @@ func (s *Server) handleRoom(w http.ResponseWriter, r *http.Request) {
 	room := r.PathValue("room")
 
 	// 验证该宿舍是否在监控列表中
-	targets := s.cfgHub.Config().GetTargets()
+	targets := s.cfgHub.Config().GetWebTargets()
 	monitored := false
 	for _, t := range targets {
 		if t.Campus == campus && t.Building == building && t.Room == room {
@@ -269,16 +271,25 @@ func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 获取配置中的 label 映射
-	targets := s.cfgHub.Config().GetTargets()
+	targets := s.cfgHub.Config().GetWebTargets()
 	labelMap := make(map[string]string)
 	for _, t := range targets {
 		labelMap[t.Key()] = t.DisplayLabel()
+	}
+	hidden := make(map[string]struct{})
+	for _, t := range s.cfgHub.Config().GetTargets() {
+		if !t.IsShownInWeb() {
+			hidden[t.Key()] = struct{}{}
+		}
 	}
 
 	out := make([]outputRow, 0, len(rows))
 	for _, row := range rows {
 		label := row.RoomLabel
 		key := row.Campus + "|" + row.Building + "|" + row.Room
+		if _, ok := hidden[key]; ok {
+			continue
+		}
 		if l, ok := labelMap[key]; ok && l != "" {
 			label = l
 		}
@@ -303,17 +314,18 @@ func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfgHub.Config()
 	authorized := s.checkAdminKey(r)
-	if r.Header.Get("Authorization") != "" && !authorized {
+	if adminCredentialProvided(r) && !authorized {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="elec-admin"`)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "管理密钥无效"})
 		return
 	}
 	out := map[string]any{
-		"targets":             cfg.GetTargets(),
+		"targets":             cfg.GetWebTargets(),
 		"defaults":            map[string]int{"feeitemid": config.DefaultFeeItemID, "appId": config.DefaultAppID},
 		"admin_auth_required": true,
 	}
 	if authorized {
+		out["targets"] = cfg.GetTargets()
 		out["username"] = cfg.Username
 		out["port"] = cfg.Port
 		out["base_url"] = cfg.BaseURL
@@ -388,6 +400,10 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target 的 feeitemid/appId 必须为正整数"})
 			return
 		}
+		if body.Target.PollIntervalMin != nil && (*body.Target.PollIntervalMin < 1 || *body.Target.PollIntervalMin > 7*24*60) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target 的 poll_interval_minutes 必须在 1..10080 之间"})
+			return
+		}
 		if body.Target.Label == "" {
 			body.Target.Label = body.Target.Campus + "/" + body.Target.Building + "/" + body.Target.Room
 		}
@@ -399,6 +415,12 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 			for i, old := range cfg.Targets {
 				if old.Key() == target.Key() {
 					cfg.Targets[i].Label = target.Label
+					if target.ShowInWeb != nil {
+						cfg.Targets[i].ShowInWeb = target.ShowInWeb
+					}
+					if target.PollIntervalMin != nil {
+						cfg.Targets[i].PollIntervalMin = target.PollIntervalMin
+					}
 					return nil
 				}
 			}
@@ -806,17 +828,23 @@ func (s *Server) checkAdminKey(r *http.Request) bool {
 	if s.adminKey == "" {
 		return false
 	}
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-		return false
+	authHeader := r.Header.Get("Authorization")
+	provided := ""
+	if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+		provided = strings.TrimSpace(authHeader[7:])
+	} else {
+		provided = strings.TrimSpace(r.URL.Query().Get("key"))
 	}
-	provided := strings.TrimSpace(auth[7:])
 	if len(provided) < 16 || len(provided) > 256 {
 		return false
 	}
 	providedHash := sha256.Sum256([]byte(provided))
 	expectedHash := sha256.Sum256([]byte(s.adminKey))
 	return subtle.ConstantTimeCompare(providedHash[:], expectedHash[:]) == 1
+}
+
+func adminCredentialProvided(r *http.Request) bool {
+	return r.Header.Get("Authorization") != "" || r.URL.Query().Has("key")
 }
 
 // CloseSSE 关闭 SSE Hub，断开所有 SSE 客户端连接。
@@ -1032,6 +1060,10 @@ func (w *gzipResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Has("key") {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Pragma", "no-cache")
+		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-Permitted-Cross-Domain-Policies", "none")

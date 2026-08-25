@@ -1,5 +1,5 @@
 const CACHE_PREFIX = 'elec-monitor-';
-const CACHE_NAME = `${CACHE_PREFIX}v6`;
+const CACHE_NAME = `${CACHE_PREFIX}v7`;
 const APP_SHELL = [
   '/',
   '/offline.html',
@@ -31,7 +31,7 @@ self.addEventListener('fetch', event => {
   if (url.origin !== self.location.origin || url.pathname === '/api/events') return;
 
   // 管理请求和所有写请求绝不进入缓存。
-  if (request.method !== 'GET' || request.headers.has('Authorization')) {
+  if (request.method !== 'GET' || request.headers.has('Authorization') || url.searchParams.has('key')) {
     event.respondWith(fetch(request));
     return;
   }

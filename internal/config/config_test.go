@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"testing"
+	"time"
 )
 
 func TestTargetKey(t *testing.T) {
@@ -15,6 +16,49 @@ func TestTargetKey(t *testing.T) {
 	expected := "江枫|1号楼|101"
 	if key != expected {
 		t.Fatalf("expected %q, got %q", expected, key)
+	}
+}
+
+func boolPtr(value bool) *bool { return &value }
+func intPtr(value int) *int    { return &value }
+
+func TestTargetWebVisibilityAndPollInterval(t *testing.T) {
+	global := 60
+	visible := Target{}
+	if !visible.IsShownInWeb() {
+		t.Fatal("omitted show_in_web should default to visible")
+	}
+	hidden := Target{ShowInWeb: boolPtr(false), PollIntervalMin: intPtr(15)}
+	if hidden.IsShownInWeb() {
+		t.Fatal("explicit show_in_web=false should be hidden")
+	}
+	if got := hidden.PollInterval(global); got != 15*time.Minute {
+		t.Fatalf("target interval = %s, want 15m", got)
+	}
+	if got := visible.PollInterval(global); got != time.Hour {
+		t.Fatalf("global fallback interval = %s, want 1h", got)
+	}
+}
+
+func TestConfigGetWebTargets(t *testing.T) {
+	cfg := &Config{Targets: []Target{
+		{Campus: "A", Building: "B", Room: "1"},
+		{Campus: "A", Building: "B", Room: "2", ShowInWeb: boolPtr(false)},
+	}}
+	targets := cfg.GetWebTargets()
+	if len(targets) != 1 || targets[0].Room != "1" {
+		t.Fatalf("web targets = %+v", targets)
+	}
+}
+
+func TestTargetPollIntervalValidation(t *testing.T) {
+	cfg := &Config{
+		Username: "u", Port: 8080, BaseURL: DefaultBaseURL,
+		PollIntervalMin: 60, RateLimitPerMinute: 30,
+		Targets: []Target{{FeeItemID: 409, AppID: 34, Campus: "A", Building: "B", Room: "C", PollIntervalMin: intPtr(0)}},
+	}
+	if err := ValidateConfig(cfg); err == nil {
+		t.Fatal("zero target poll interval should be rejected")
 	}
 }
 

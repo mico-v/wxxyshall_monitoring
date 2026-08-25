@@ -388,7 +388,7 @@ func cmdRun() {
 }
 
 // runCollectLoop 后台采集循环:
-//   - 按配置 poll_interval_minutes 定时采集;
+//   - 每个宿舍按自己的 poll_interval_minutes 定时采集,未配置时使用全局值;
 //   - 每 2 秒检测一次 config.json / token.json 变更,配置/间隔/token 修改自动生效;
 //   - token 临近过期时每天提醒一次。
 func runCollectLoop(ctx context.Context, hub *config.Hub, service *collector.Service) {
@@ -398,13 +398,9 @@ func runCollectLoop(ctx context.Context, hub *config.Hub, service *collector.Ser
 		return
 	}
 
-	initialCfg := hub.Config()
-	interval := collectInterval(initialCfg)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	// 立即执行一次
-	go doCollect(ctx, hub.Config(), service)
+	schedules := make(map[string]targetSchedule)
+	collectTimer := time.NewTimer(0) // 启动后立即执行一次所有目标
+	defer collectTimer.Stop()
 
 	watch := time.NewTicker(2 * time.Second)
 	defer watch.Stop()
@@ -413,8 +409,18 @@ func runCollectLoop(ctx context.Context, hub *config.Hub, service *collector.Ser
 
 	for {
 		select {
-		case <-ticker.C:
-			go doCollect(ctx, hub.Config(), service)
+		case now := <-collectTimer.C:
+			cfg := hub.Config()
+			reconcileTargetSchedules(schedules, cfg, now)
+			targets := dueTargets(schedules, cfg, now)
+			if len(targets) > 0 && service.TryReserve() {
+				markTargetsScheduled(schedules, targets, now)
+				go doCollectTargetsReserved(ctx, targets, service)
+			} else if len(targets) > 0 {
+				collectTimer.Reset(2 * time.Second)
+				continue
+			}
+			collectTimer.Reset(nextScheduleDelay(schedules, time.Now()))
 		case <-watch.C:
 			cfgChanged, tokChanged, err := hub.Reload()
 			if err != nil {
@@ -435,14 +441,9 @@ func runCollectLoop(ctx context.Context, hub *config.Hub, service *collector.Ser
 					"interval_minutes", cfg.PollIntervalMin,
 					"rate_limit", cfg.RateLimitPerMinute)
 			}
-
-			// 间隔变了 → 重建 ticker
-			ni := collectInterval(cfg)
-			if ni != interval {
-				ticker.Reset(ni)
-				interval = ni
-				slog.Info("采集间隔已更新", "interval_minutes", int(ni/time.Minute))
-			}
+			now := time.Now()
+			reconcileTargetSchedules(schedules, cfg, now)
+			resetTimer(collectTimer, nextScheduleDelay(schedules, now))
 			warnTokenExpiry(hub.Token(), &lastExpiryWarn)
 		case <-ctx.Done():
 			return
@@ -450,12 +451,82 @@ func runCollectLoop(ctx context.Context, hub *config.Hub, service *collector.Ser
 	}
 }
 
-// collectInterval 从配置取采集间隔,非法值回退 60 分钟。
-func collectInterval(cfg *config.Config) time.Duration {
-	if cfg == nil || cfg.PollIntervalMin <= 0 {
-		return 60 * time.Minute
+type targetSchedule struct {
+	interval time.Duration
+	due      time.Time
+}
+
+func reconcileTargetSchedules(schedules map[string]targetSchedule, cfg *config.Config, now time.Time) {
+	active := make(map[string]struct{})
+	if cfg != nil {
+		for _, target := range cfg.GetTargets() {
+			key := target.Key()
+			active[key] = struct{}{}
+			interval := target.PollInterval(cfg.PollIntervalMin)
+			current, ok := schedules[key]
+			if !ok || current.interval != interval {
+				schedules[key] = targetSchedule{interval: interval, due: now}
+			}
+		}
 	}
-	return time.Duration(cfg.PollIntervalMin) * time.Minute
+	for key := range schedules {
+		if _, ok := active[key]; !ok {
+			delete(schedules, key)
+		}
+	}
+}
+
+func dueTargets(schedules map[string]targetSchedule, cfg *config.Config, now time.Time) []config.Target {
+	if cfg == nil {
+		return nil
+	}
+	var targets []config.Target
+	for _, target := range cfg.GetTargets() {
+		schedule, ok := schedules[target.Key()]
+		if !ok || schedule.due.After(now) {
+			continue
+		}
+		targets = append(targets, target)
+	}
+	return targets
+}
+
+func markTargetsScheduled(schedules map[string]targetSchedule, targets []config.Target, now time.Time) {
+	for _, target := range targets {
+		schedule, ok := schedules[target.Key()]
+		if !ok {
+			continue
+		}
+		schedule.due = now.Add(schedule.interval)
+		schedules[target.Key()] = schedule
+	}
+}
+
+func nextScheduleDelay(schedules map[string]targetSchedule, now time.Time) time.Duration {
+	if len(schedules) == 0 {
+		return time.Hour
+	}
+	var next time.Time
+	for _, schedule := range schedules {
+		if next.IsZero() || schedule.due.Before(next) {
+			next = schedule.due
+		}
+	}
+	delay := next.Sub(now)
+	if delay < time.Millisecond {
+		return time.Millisecond
+	}
+	return delay
+}
+
+func resetTimer(timer *time.Timer, delay time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(delay)
 }
 
 // warnTokenExpiry 在 token 临近过期(剩余 < 7 天)时每天提醒一次。
@@ -474,19 +545,14 @@ func warnTokenExpiry(tok *config.Token, last *time.Time) {
 	slog.Warn("token 即将过期，请重新运行 login.py --push", "days_left", left)
 }
 
-func doCollect(ctx context.Context, cfg *config.Config, service *collector.Service) {
-	if cfg == nil || service == nil {
+func doCollectTargetsReserved(ctx context.Context, targets []config.Target, service *collector.Service) {
+	if service == nil || len(targets) == 0 {
+		if service != nil {
+			service.ReleaseReservation()
+		}
 		return
 	}
-	targets := cfg.GetTargets()
-	if len(targets) == 0 {
-		return
-	}
-	results, err := service.CollectAll(ctx, targets, nil)
-	if errors.Is(err, collector.ErrBusy) {
-		slog.Info("定时采集跳过: 已有采集任务运行中")
-		return
-	}
+	results, err := service.CollectAllReserved(ctx, targets, nil)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		slog.Warn("定时采集提前结束", "err", err)
 	}

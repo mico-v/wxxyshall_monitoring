@@ -35,6 +35,10 @@ python3 login.py
 ADMIN_KEY='<管理密钥>' python3 login.py \
   --push https://elec.example.edu.cn --push-only
 
+# 也可把密钥直接放在推送 URL 中
+python3 login.py \
+  --push 'https://elec.example.edu.cn/?key=<管理密钥>' --push-only
+
 # 也可从文件读取密钥，避免出现在 shell 历史和进程环境中
 python3 login.py --push https://elec.example.edu.cn --push-only \
   --admin-key-file /opt/elec/data/.admin_key
@@ -58,7 +62,7 @@ export ELEc_DIR="$PWD/.local-elec"
 ./elec run
 ```
 
-首次运行会生成 `$ELEc_DIR/data/config.json` 和 `$ELEc_DIR/data/.admin_key`。打开 `http://localhost:8080`，进入“查询设置”时输入管理密钥，即可级联选择并添加宿舍。
+首次运行会生成 `$ELEc_DIR/data/config.json` 和 `$ELEc_DIR/data/.admin_key`。打开 `http://localhost:8080`，进入“查询设置”时输入管理密钥，即可级联选择并添加宿舍。也可直接打开 `http://localhost:8080/?key=<管理密钥>`；网页读取后会把 `key` 从地址栏移除，并只保存到当前标签页的 `sessionStorage`。
 
 ### systemd 安装
 
@@ -100,7 +104,9 @@ elec config       # 显示密钥文件位置，不直接打印密钥
       "campus": "校区接口值",
       "building": "楼栋接口值",
       "room": "房间接口值",
-      "label": "宿舍显示名称"
+      "label": "宿舍显示名称",
+      "show_in_web": true,
+      "poll_interval_minutes": 30
     }
   ],
   "poll_interval_minutes": 60,
@@ -115,6 +121,8 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 - `poll_interval_minutes` 为 `1..10080`。
 - `rate_limit_per_minute` 为 `1..600`。例如 `30` 表示任意两次学校 HTTP 请求至少间隔 2 秒，并非一分钟突发 30 次。
 - 每个目标的 `feeitemid`、`appId` 必须为正整数，`campus/building/room` 非空且组合不可重复。
+- 目标的 `show_in_web` 可省略，默认 `true`；设为 `false` 后仍会定时/手动采集，但不会出现在公开配置、读数、宿舍页面或 SSE 中。
+- 目标的 `poll_interval_minutes` 可省略；省略时继承全局 `poll_interval_minutes`，设置后以该宿舍的 `1..10080` 分钟周期覆盖全局值。
 - `targets` 数组顺序就是仪表盘和批量采集顺序。
 
 网页“查询设置”仅显示已有宿舍，并允许通过校区→楼栋→房间级联添加宿舍；添加后自动保存。网页不编辑服务字段、目标字段和顺序，也不提供删除操作。需要修改、排序或删除时由管理员直接编辑 `config.json`，保存后会热重载。systemd 安装环境中请保持文件归属 `elec:elec`、权限 `0640`，数据目录不允许符号链接或特殊文件。
@@ -123,7 +131,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 
 - 管理密钥存放于数据目录的 `.admin_key`，服务启动时读取；不会写入 `config.json` 或 systemd unit。
 - 浏览器只把密钥放在 `sessionStorage`，关闭标签页后失效。公开仪表盘、读数和读数 SSE 不需要密钥。
-- 管理 API 使用 `Authorization: Bearer <key>`。生产部署建议放在 HTTPS 反向代理后，避免明文 HTTP 传输密钥和 token。
+- 管理 API 使用 `Authorization: Bearer <key>`，也接受 `?key=<key>`。生产部署建议放在 HTTPS 反向代理后；查询参数可能出现在代理访问日志中，应限制日志访问并避免分享含密钥的原始链接。
 - JSON 请求限制为 1 MiB、拒绝未知字段和多余 JSON；配置、token 使用临时文件 + `fsync` + 原子替换保存。
 - 默认安装服务不以 root 运行，数据目录及敏感文件采用受限权限。
 - 历史记录没有删除 API 或自动清理任务；请自行备份整个数据目录。

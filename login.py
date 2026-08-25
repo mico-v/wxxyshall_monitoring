@@ -23,6 +23,7 @@ import time
 import argparse
 import tempfile
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -69,6 +70,10 @@ def push_token(server_url: str, tok: dict, admin_key_file: str | None) -> None:
     """推送 token 到远程服务器。"""
     import requests
 
+    parts = urlsplit(server_url.strip())
+    query_items = parse_qsl(parts.query, keep_blank_values=True)
+    url_key = next((value.strip() for name, value in query_items if name == "key" and value.strip()), "")
+
     key = ""
     if admin_key_file:
         try:
@@ -78,10 +83,14 @@ def push_token(server_url: str, tok: dict, admin_key_file: str | None) -> None:
     if not key:
         key = os.environ.get("ADMIN_KEY", "").strip()
     if not key:
-        print("[x] 需要 ADMIN_KEY 环境变量来推送 token（与服务器 ADMIN_KEY 一致）")
+        key = url_key
+    if not key:
+        print("[x] 需要管理密钥：使用 --admin-key-file、ADMIN_KEY，或在 --push URL 后添加 ?key=...")
         sys.exit(1)
 
-    url = server_url.rstrip("/") + "/api/token"
+    clean_query = urlencode([(name, value) for name, value in query_items if name != "key"])
+    endpoint_path = parts.path.rstrip("/") + "/api/token"
+    url = urlunsplit((parts.scheme, parts.netloc, endpoint_path, clean_query, ""))
     r = requests.post(url, json=tok,
                       headers={"Authorization": f"Bearer {key}"},
                       timeout=20, allow_redirects=False)

@@ -102,6 +102,71 @@ func TestConfigAPIProtectsFullConfigurationAndMutations(t *testing.T) {
 	}
 }
 
+func TestAdminKeyAcceptedFromQueryParameter(t *testing.T) {
+	server := newTestServer(t)
+	handler := server.Handler()
+
+	valid := httptest.NewRecorder()
+	handler.ServeHTTP(valid, httptest.NewRequest(http.MethodPost, "/api/admin/verify?key=0123456789abcdef", nil))
+	if valid.Code != http.StatusOK {
+		t.Fatalf("query key status = %d body=%s", valid.Code, valid.Body.String())
+	}
+	if got := valid.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("query key Cache-Control = %q, want no-store", got)
+	}
+
+	invalid := httptest.NewRecorder()
+	handler.ServeHTTP(invalid, httptest.NewRequest(http.MethodPost, "/api/admin/verify?key=0000000000000000", nil))
+	if invalid.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid query key status = %d", invalid.Code)
+	}
+}
+
+func TestHiddenTargetExcludedFromPublicConfigAndRoomPage(t *testing.T) {
+	server := newTestServer(t)
+	hidden := false
+	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
+		cfg.Targets = append(cfg.Targets, config.Target{
+			FeeItemID: 409, AppID: 34, Campus: "X", Building: "Y", Room: "Z", Label: "hidden", ShowInWeb: &hidden,
+		})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	public := httptest.NewRecorder()
+	server.Handler().ServeHTTP(public, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	var publicBody struct {
+		Targets []config.Target `json:"targets"`
+	}
+	if err := json.Unmarshal(public.Body.Bytes(), &publicBody); err != nil {
+		t.Fatal(err)
+	}
+	if len(publicBody.Targets) != 1 {
+		t.Fatalf("public targets = %d, want 1", len(publicBody.Targets))
+	}
+
+	admin := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	server.Handler().ServeHTTP(admin, req)
+	var adminBody struct {
+		Targets []config.Target `json:"targets"`
+	}
+	if err := json.Unmarshal(admin.Body.Bytes(), &adminBody); err != nil {
+		t.Fatal(err)
+	}
+	if len(adminBody.Targets) != 2 {
+		t.Fatalf("admin targets = %d, want 2", len(adminBody.Targets))
+	}
+
+	room := httptest.NewRecorder()
+	server.Handler().ServeHTTP(room, httptest.NewRequest(http.MethodGet, "/room/X/Y/Z", nil))
+	if !strings.Contains(room.Body.String(), "404") {
+		t.Fatal("hidden room page should serve 404 content")
+	}
+}
+
 func TestConfigAPIAddsTargetAndOnlyUpdatesLabelForDuplicate(t *testing.T) {
 	server := newTestServer(t)
 	handler := server.Handler()
@@ -438,7 +503,7 @@ func TestPWAAssetsAreEmbeddedAndConsistent(t *testing.T) {
 
 	swRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(swRecorder, httptest.NewRequest(http.MethodGet, "/sw.js", nil))
-	if swRecorder.Code != http.StatusOK || !strings.Contains(swRecorder.Body.String(), "`${CACHE_PREFIX}v6`") {
+	if swRecorder.Code != http.StatusOK || !strings.Contains(swRecorder.Body.String(), "`${CACHE_PREFIX}v7`") {
 		t.Fatalf("service worker response invalid: status=%d", swRecorder.Code)
 	}
 	if got := swRecorder.Header().Get("Cache-Control"); got != "no-cache" {

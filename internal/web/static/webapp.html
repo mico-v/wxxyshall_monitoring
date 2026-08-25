@@ -1056,6 +1056,18 @@ let draftTargets = [];
 let pickCampus = null, pickBuilding = null, pickRoom = null;
 const ADMIN_KEY_SESSION = "elec-admin-key";
 let adminKey = sessionStorage.getItem(ADMIN_KEY_SESSION) || "";
+// 允许通过 /?key=... 直接打开管理页面；读取后立即从地址栏移除，避免密钥留在历史记录/复制链接中。
+try {
+  const directURL = new URL(location.href);
+  const keyFromURL = directURL.searchParams.get("key");
+  if (keyFromURL && keyFromURL.trim()) {
+    adminKey = keyFromURL.trim();
+    sessionStorage.setItem(ADMIN_KEY_SESSION, adminKey);
+    directURL.searchParams.delete("key");
+    const clean = directURL.pathname + directURL.search + directURL.hash;
+    history.replaceState(history.state, "", clean);
+  }
+} catch (_) {}
 let adminPromptResolver = null;
 
 function initAdminPrompt() {
@@ -1216,7 +1228,7 @@ function renderTargetList() {
 
 async function openSettings() {
   if (!await ensureAdmin()) return;
-  const cfg = await refreshPublicConfig();
+  const cfg = await responseJSON(await adminFetch("/api/config"));
   draftTargets = (cfg.targets || []).map(t => ({ ...t }));
   renderTargetList();
   resetPicker();
@@ -1284,10 +1296,10 @@ function initSettings() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ target: t }),
       }));
-      state.targets = body.targets || [];
-      draftTargets = state.targets.map(x => ({ ...x }));
+      draftTargets = (body.targets || []).map(x => ({ ...x }));
       renderTargetList();
       document.getElementById("pick-preview").textContent = replacing ? "已更新宿舍 tag" : "已添加并自动保存";
+      await refreshPublicConfig();
       await refresh();
     } catch (e) {
       document.getElementById("pick-preview").textContent = "保存失败: " + e.message;
