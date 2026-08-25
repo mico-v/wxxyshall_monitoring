@@ -62,6 +62,57 @@ export ELEc_DIR="$PWD/.local-elec"
 ./elec run
 ```
 
+### Windows 版本
+
+更完整的图文式步骤见 [Windows 安装与使用](docs/WINDOWS.md)，所有配置字段见 [配置文件说明](docs/CONFIGURATION.md)。
+
+Windows 使用单个 `elec.exe`，首次运行会自动复制到：
+
+```text
+%LOCALAPPDATA%\WxxyshallMonitoring\
+├── elec.exe
+└── data\
+    ├── config.json
+    ├── token.json
+    ├── .admin_key
+    ├── electricity.db
+    └── elec.log
+```
+
+程序会为当前 Windows 用户写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，实现登录后自动启动。服务只监听 `127.0.0.1`，双击系统托盘图标或右键菜单中的“打开仪表盘 / 管理页面”即可访问同一个网页；不嵌入 WebView，也不需要管理员权限。
+
+下载后直接双击 `elec.exe` 即可安装并启动。命令行方式：
+
+```powershell
+.\elec.exe install       # 安装并设置当前用户开机启动
+.\elec.exe run           # 启动后台服务和托盘
+.\elec.exe status        # 查看自启动状态
+.\elec.exe config        # 查看配置目录
+```
+
+首次安装会自动打开带管理密钥的本机地址。密钥只保存在 `data\.admin_key`，不会写入注册表；网页读取 URL 中的 `key` 后会立即从地址栏移除。
+
+如果需要自定义位置，可在启动前设置 `ELEc_DIR`：
+
+```powershell
+$env:ELEc_DIR = 'D:\WxxyshallMonitoring'
+.\elec.exe run
+```
+
+### 手工交叉编译
+
+```bash
+# Linux
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o elec-linux-amd64 ./cmd/elec
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o elec-linux-arm64 ./cmd/elec
+
+# Windows：隐藏控制台窗口，使用系统托盘
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+  go build -ldflags='-H=windowsgui' -o elec-windows-amd64.exe ./cmd/elec
+```
+
+GitHub Actions 位于 `.github/workflows/release.yml`。推送到 `main` 会构建并上传 Linux amd64/arm64、Windows amd64 工件；推送 `v*` 标签还会自动创建 GitHub Release 并附加压缩包。
+
 首次运行会生成 `$ELEc_DIR/data/config.json` 和 `$ELEc_DIR/data/.admin_key`。打开 `http://localhost:8080`，进入“查询设置”时输入管理密钥，即可级联选择并添加宿舍。也可直接打开 `http://localhost:8080/?key=<管理密钥>`；网页读取后会把 `key` 从地址栏移除，并只保存到当前标签页的 `sessionStorage`。
 
 ### systemd 安装

@@ -7,6 +7,13 @@ import (
 	"testing"
 )
 
+func TestSQLiteFileURLWindowsPath(t *testing.T) {
+	u := sqliteFileURL(`C:\Users\M\AppData\Local\WxxyshallMonitoring\data\electricity.db`, true)
+	if got, want := u.String(), "file:///C:/Users/M/AppData/Local/WxxyshallMonitoring/data/electricity.db"; got != want {
+		t.Fatalf("Windows SQLite URL = %q, want %q", got, want)
+	}
+}
+
 func TestQueryReadingsRetainsAllAndReturnsNewestTenThousand(t *testing.T) {
 	database, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

@@ -27,6 +27,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -51,6 +52,7 @@ const (
 )
 
 func main() {
+	platformInitialize()
 	// 初始化结构化日志
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -66,15 +68,15 @@ func main() {
 
 	switch cmd {
 	case "install":
-		cmdInstall()
+		cmdInstallPlatform()
 	case "run":
 		cmdRun()
 	case "collect":
 		cmdCollect()
 	case "status":
-		cmdStatus()
+		cmdStatusPlatform()
 	case "logs":
-		cmdLogs()
+		cmdLogsPlatform()
 	case "token":
 		cmdToken()
 	case "config":
@@ -89,7 +91,11 @@ func main() {
 }
 
 func printHelp() {
-	fmt.Print(`宿舍电费监控 — 管理工具
+	fmt.Print(platformHelpText())
+}
+
+func linuxHelpText() string {
+	return `宿舍电费监控 — 管理工具
 
 用法:
   elec                    启动服务（webapp + 采集循环）
@@ -111,7 +117,7 @@ func printHelp() {
   2. 浏览器打开 http://服务器IP:8080
   3. 在「查询设置」中添加要监控的宿舍
   4. 本地运行 python3 login.py --push http://服务器IP:8080
-`)
+`
 }
 
 // elecDir 返回数据目录。
@@ -119,7 +125,7 @@ func elecDir() string {
 	if d := os.Getenv("ELEc_DIR"); d != "" {
 		return d
 	}
-	return installDir
+	return platformDefaultDir()
 }
 
 // dataDir 返回数据子目录。
@@ -129,7 +135,7 @@ func dataDir() string {
 
 // -------- 安装 --------
 
-func cmdInstall() {
+func cmdInstallLinux() {
 	if os.Geteuid() != 0 {
 		fmt.Println("安装需要 root 权限，请使用: sudo elec install")
 		os.Exit(1)
@@ -282,6 +288,13 @@ WantedBy=multi-user.target
 // -------- 运行 --------
 
 func cmdRun() {
+	if handoff, err := platformPrepareRun(); err != nil {
+		slog.Error("准备运行环境失败", "err", err)
+		platformReportError("宿舍电费监控启动失败", err)
+		os.Exit(1)
+	} else if handoff {
+		return
+	}
 	dir := elecDir()
 	data := dataDir()
 
@@ -289,18 +302,24 @@ func cmdRun() {
 		slog.Error("创建数据目录失败", "err", err)
 		os.Exit(1)
 	}
-	if err := rejectSymlinkComponents(data); err != nil {
+	if err := platformConfigureLogging(data); err != nil {
+		slog.Warn("配置平台日志失败", "err", err)
+	}
+	if err := platformValidateDataPath(data); err != nil {
 		slog.Error("数据目录无效", "err", err)
+		platformReportError("宿舍电费监控启动失败", fmt.Errorf("数据目录无效: %w", err))
 		os.Exit(1)
 	}
 	if err := secureDataPermissions(data); err != nil {
 		slog.Error("数据目录安全检查失败", "err", err)
+		platformReportError("宿舍电费监控启动失败", fmt.Errorf("数据目录安全检查失败: %w", err))
 		os.Exit(1)
 	}
 
 	// 生成默认配置
 	if err := config.GenerateDefaultConfig(); err != nil {
 		slog.Error("生成默认配置失败", "err", err)
+		platformReportError("宿舍电费监控启动失败", fmt.Errorf("生成默认配置失败: %w", err))
 		os.Exit(1)
 	}
 	if err := secureDataPermissions(data); err != nil {
@@ -312,6 +331,7 @@ func cmdRun() {
 	hub, err := config.NewHub()
 	if err != nil {
 		slog.Error("配置加载失败", "err", err)
+		platformReportError("宿舍电费监控启动失败", fmt.Errorf("配置加载失败: %w", err))
 		os.Exit(1)
 	}
 
@@ -320,6 +340,7 @@ func cmdRun() {
 		adminKey, err = loadOrCreateAdminKey(data)
 		if err != nil {
 			slog.Error("加载管理密钥失败", "err", err)
+			platformReportError("宿舍电费监控启动失败", fmt.Errorf("加载管理密钥失败: %w", err))
 			os.Exit(1)
 		}
 	}
@@ -337,6 +358,7 @@ func cmdRun() {
 	)
 	if err != nil {
 		slog.Error("服务器初始化失败", "err", err)
+		platformReportError("宿舍电费监控启动失败", fmt.Errorf("服务器初始化失败: %w", err))
 		os.Exit(1)
 	}
 	runCtx, stopRun := context.WithCancel(context.Background())
@@ -348,7 +370,7 @@ func cmdRun() {
 		port = 8080
 	}
 
-	addr := fmt.Sprintf(":%d", port)
+	addr := platformListenAddr(port)
 	httpServer := &http.Server{
 		Addr:              addr,
 		Handler:           server.Handler(),
@@ -363,13 +385,36 @@ func cmdRun() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		slog.Error("监听仪表盘端口失败", "addr", addr, "err", err)
+		platformReportError("宿舍电费监控启动失败", fmt.Errorf("监听 %s 失败: %w", addr, err))
+		stopRun()
+		_ = server.Close()
+		return
+	}
 	go func() {
 		slog.Info("仪表盘启动", "addr", addr, "port", port)
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
 			slog.Error("HTTP 服务器错误", "err", err)
 			os.Exit(1)
 		}
 	}()
+	if platformShouldOpenDashboard() {
+		time.Sleep(300 * time.Millisecond)
+		if err := platformOpenDashboard(port, adminKey); err != nil {
+			slog.Warn("打开仪表盘失败", "err", err)
+		}
+	}
+	if err := platformStartUI(port, adminKey, sigCh); err != nil {
+		slog.Error("启动系统界面失败", "err", err)
+		platformReportError("宿舍电费监控启动失败", err)
+		stopRun()
+		server.CloseSSE()
+		_ = httpServer.Close()
+		_ = server.Close()
+		os.Exit(1)
+	}
 
 	<-sigCh
 	slog.Info("收到退出信号，正在关闭服务器")
@@ -606,7 +651,7 @@ func runCollectCommand() error {
 
 // -------- 状态/日志 --------
 
-func cmdStatus() {
+func cmdStatusLinux() {
 	cmd := exec.Command("systemctl", "status", serviceName, "--no-pager", "-l")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -615,7 +660,7 @@ func cmdStatus() {
 	}
 }
 
-func cmdLogs() {
+func cmdLogsLinux() {
 	cmd := exec.Command("journalctl", "-u", serviceName, "-n", "50", "--no-pager", "-f")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -906,7 +951,7 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	return nil
 }
 
-func secureDataPermissions(data string) error {
+func secureDataPermissionsUnix(data string) error {
 	return filepath.WalkDir(data, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr

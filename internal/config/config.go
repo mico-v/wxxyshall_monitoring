@@ -1,5 +1,6 @@
 // Package config 管理配置文件和 token 文件的读写。
-// 数据目录由 ELEc_DIR 环境变量指定，默认为 /opt/elec/data。
+// 数据目录由 ELEc_DIR 环境变量指定；Linux 默认 /opt/elec/data，
+// Windows 默认 %LOCALAPPDATA%/WxxyshallMonitoring/data。
 package config
 
 import (
@@ -96,7 +97,7 @@ func (c *Config) GetTargets() []Target {
 	if c == nil || len(c.Targets) == 0 {
 		return nil
 	}
-	return append([]Target(nil), c.Targets...)
+	return c.Clone().Targets
 }
 
 // GetWebTargets returns only targets enabled for public web display.
@@ -117,12 +118,12 @@ func (c *Config) GetWebTargets() []Target {
 }
 
 // DataDir 返回数据目录路径。
-// 优先使用 ELEc_DIR 环境变量下的 data 子目录，否则使用 /opt/elec/data。
+// 优先使用 ELEc_DIR 环境变量下的 data 子目录，否则使用平台默认目录。
 func DataDir() string {
 	if d := os.Getenv("ELEc_DIR"); d != "" {
 		return filepath.Join(d, "data")
 	}
-	return "/opt/elec/data"
+	return defaultDataDir()
 }
 
 // ConfigPath 返回 config.json 的完整路径。

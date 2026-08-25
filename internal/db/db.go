@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -50,7 +51,11 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("创建数据库目录失败: %w", err)
 	}
 
-	dsnURL := &url.URL{Scheme: "file", Path: path}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("解析数据库绝对路径失败: %w", err)
+	}
+	dsnURL := sqliteFileURL(absPath, runtime.GOOS == "windows")
 	query := dsnURL.Query()
 	query.Add("_pragma", "journal_mode(WAL)")
 	query.Add("_pragma", "busy_timeout(5000)")
@@ -74,6 +79,28 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("设置数据库权限失败: %w", err)
 	}
 	return d, nil
+}
+
+func sqliteFileURL(path string, windowsPath bool) *url.URL {
+	if windowsPath {
+		path = strings.Map(func(r rune) rune {
+			if r == rune(92) {
+				return '/'
+			}
+			return r
+		}, path)
+		for strings.Contains(path, "//") {
+			path = strings.ReplaceAll(path, "//", "/")
+		}
+	}
+	normalized := filepath.ToSlash(path)
+	if windowsPath {
+		normalized = strings.ReplaceAll(path, `\`, "/")
+		if len(normalized) >= 2 && normalized[1] == ':' && !strings.HasPrefix(normalized, "/") {
+			normalized = "/" + normalized
+		}
+	}
+	return &url.URL{Scheme: "file", Path: normalized}
 }
 
 // init 初始化数据库 schema。
