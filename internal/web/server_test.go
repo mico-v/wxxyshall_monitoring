@@ -235,6 +235,30 @@ func TestWebappSettingsOnlyExposeDormitoryAddition(t *testing.T) {
 	}
 }
 
+func TestFaviconIsServedAndReferencedByPages(t *testing.T) {
+	server := newTestServer(t)
+	handler := server.Handler()
+
+	icon := httptest.NewRecorder()
+	handler.ServeHTTP(icon, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
+	if icon.Code != http.StatusOK || icon.Header().Get("Content-Type") != "image/x-icon" {
+		t.Fatalf("favicon response = %d %q", icon.Code, icon.Header().Get("Content-Type"))
+	}
+	if body := icon.Body.Bytes(); len(body) < 4 || string(body[:4]) != "\x00\x00\x01\x00" {
+		t.Fatal("favicon response is not an ICO file")
+	}
+
+	for _, page := range []string{"webapp.html", "404.html", "offline.html"} {
+		data, err := readEmbeddedFile(page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), `<link rel="icon" href="/favicon.ico"`) {
+			t.Fatalf("%s does not reference /favicon.ico", page)
+		}
+	}
+}
+
 func TestDiscoverServesProcessCacheWithoutToken(t *testing.T) {
 	server := newTestServer(t)
 	cfg := server.cfgHub.Config()
@@ -503,7 +527,7 @@ func TestPWAAssetsAreEmbeddedAndConsistent(t *testing.T) {
 
 	swRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(swRecorder, httptest.NewRequest(http.MethodGet, "/sw.js", nil))
-	if swRecorder.Code != http.StatusOK || !strings.Contains(swRecorder.Body.String(), "`${CACHE_PREFIX}v7`") {
+	if swRecorder.Code != http.StatusOK || !strings.Contains(swRecorder.Body.String(), "`${CACHE_PREFIX}v8`") {
 		t.Fatalf("service worker response invalid: status=%d", swRecorder.Code)
 	}
 	if got := swRecorder.Header().Get("Cache-Control"); got != "no-cache" {

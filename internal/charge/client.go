@@ -89,6 +89,12 @@ type Client struct {
 	}
 }
 
+// NewClient 创建不带请求节拍器的客户端。
+// 适用于网页级联发现等由调用方自行做进程内缓存和并发合并的场景。
+func NewClient(baseURL, accessToken string) *Client {
+	return NewClientWithLimiter(baseURL, accessToken, nil)
+}
+
 // NewClientWithLimiter 创建共享严格节拍器的客户端；每一次真实 HTTP 尝试都会先等待。
 func NewClientWithLimiter(baseURL, accessToken string, limiter interface {
 	Wait(context.Context) error

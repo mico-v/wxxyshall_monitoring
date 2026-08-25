@@ -1,10 +1,11 @@
 const CACHE_PREFIX = 'elec-monitor-';
-const CACHE_NAME = `${CACHE_PREFIX}v7`;
+const CACHE_NAME = `${CACHE_PREFIX}v8`;
 const APP_SHELL = [
   '/',
   '/offline.html',
   '/404.html',
   '/manifest.json',
+  '/favicon.ico',
   '/static/echarts.min.js',
   '/static/icon-192.png',
   '/static/icon-512.png',
@@ -36,7 +37,7 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  if (url.pathname.startsWith('/static/') || url.pathname === '/manifest.json') {
+  if (url.pathname.startsWith('/static/') || url.pathname === '/manifest.json' || url.pathname === '/favicon.ico') {
     event.respondWith(cacheFirst(request));
     return;
   }

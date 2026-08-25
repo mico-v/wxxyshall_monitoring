@@ -109,6 +109,7 @@ func (s *Server) Handler() http.Handler {
 
 	// 静态文件
 	mux.HandleFunc("GET /static/", s.handleStatic)
+	mux.HandleFunc("GET /favicon.ico", s.serveFile("favicon.ico", "image/x-icon"))
 	mux.HandleFunc("GET /sw.js", s.serveFile("sw.js", "application/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /manifest.json", s.serveFile("manifest.json", "application/manifest+json"))
 	mux.HandleFunc("GET /offline.html", s.serveFile("offline.html", "text/html; charset=utf-8"))
@@ -692,7 +693,9 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 		if auth.IsExpired(tok, 600) {
 			return nil, &charge.ChargeAuthError{Msg: "token 已过期或临近过期，请重新运行 login.py"}
 		}
-		client := charge.NewClientWithLimiter(cfg.BaseURL, tok.AccessToken, s.collector.Limiter())
+		// 级联发现由 discoveryCache 在进程内缓存并合并相同并发请求，
+		// 不占用定时/手动电费采集共用的 rate_limit_per_minute 节拍。
+		client := charge.NewClient(cfg.BaseURL, tok.AccessToken)
 		if err := client.EstablishContext(ctx, feeitemID, appID); err != nil {
 			return nil, err
 		}

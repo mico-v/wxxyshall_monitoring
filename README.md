@@ -7,9 +7,9 @@
 ## 主要功能
 
 - 定时或手动采集多个宿舍，结果写入 SQLite WAL 数据库。
-- 学校接口的每一次真实 HTTP 尝试（包括重试）都严格间隔 `1 分钟 / rate_limit_per_minute`。
+- 定时/手动电费采集的每一次真实 HTTP 尝试（包括重试）都严格间隔 `1 分钟 / rate_limit_per_minute`。
 - 批量采集可查看进度并真正取消正在等待或请求中的任务。
-- 校区、楼栋和房间发现结果按查询参数缓存在进程内；首次查询仍严格限流，后续访问直接读取内存，相同的并发首次查询只请求学校接口一次。
+- 网页“查询设置”中的校区、楼栋和房间发现不占用电费采集的 `rate_limit_per_minute`；结果按查询参数缓存在进程内，后续访问直接读取内存，相同的并发首次查询只请求学校接口一次。
 - 配置和 token 支持安全热重载；采集间隔、限流和目标顺序无需重启，已打开的仪表盘会在 30 秒内同步公开目标配置，端口变化需重启。
 - 历史文件不自动清理；查询接口只返回符合条件的最新 10,000 条，按时间正序展示。
 - 仪表盘按 `config.json` 中的目标顺序显示和采集。网页“查询设置”只提供级联添加宿舍；其他字段、排序和已有宿舍调整统一手工编辑 `config.json`。
@@ -216,7 +216,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 
 - `POST /api/config` 接受配置章节列出的六个顶层字段并支持部分更新；网页添加宿舍时也可单独提交 `{"target": {...}}`。新宿舍追加到列表末尾；重复宿舍只原位更新 `label`，保留其 `feeitemid`、`appId` 和顺序，不覆盖其他配置。`target` 不能与其他配置字段混用；未知字段或无效范围会返回 `400`。
 - `POST /api/collect` 请求体为 `{"campus":"...","building":"...","room":"..."}`；三个字段必须同时提供且目标必须已配置。空对象表示采集配置第一项。
-- 发现接口使用查询参数 `feeitemid`、`appId`；楼栋接口另需 `campus`，房间接口另需 `campus`、`building`。成功结果按 `base_url + feeitemid + appId + 层级参数` 缓存到当前进程，直到服务重启；错误不缓存，`base_url` 变化会使用新的缓存键。
+- 发现接口使用查询参数 `feeitemid`、`appId`；楼栋接口另需 `campus`，房间接口另需 `campus`、`building`。这些请求不受 `rate_limit_per_minute` 限制；成功结果按 `base_url + feeitemid + appId + 层级参数` 缓存到当前进程，直到服务重启；相同并发请求会合并，错误不缓存，`base_url` 变化会使用新的缓存键。
 - 批量任务状态为 `queued`、`running`、`cancelling`、`cancelled`、`done` 或 `failed`。运行中状态只返回进度计数，终态返回完整 `results`；取消必须传启动接口返回的同一个 `job_id`。
 - `POST /api/token` 接受 `access_token`、可选 `refresh_token`、`expires_in`、`login_time`、`sno` 和 `source`，拒绝未知字段及过大的 token。
 

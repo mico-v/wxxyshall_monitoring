@@ -146,7 +146,12 @@ func runWindowsTray(port int, adminKey string, signalCh chan<- os.Signal, ready 
 		return
 	}
 	instance := windows.Handle(instanceValue)
-	icon, _, _ := procLoadIcon.Call(0, 32512)
+	// 资源 ID 1 由 icon_windows_amd64.syso 嵌入，源文件是网页共用的
+	// internal/web/static/favicon.ico。加载失败时回退到系统应用图标。
+	icon, _, _ := procLoadIcon.Call(uintptr(instance), 1)
+	if icon == 0 {
+		icon, _, _ = procLoadIcon.Call(0, 32512)
+	}
 	wc := wndClassEx{
 		CbSize:    uint32(unsafe.Sizeof(wndClassEx{})),
 		WndProc:   windows.NewCallback(windowsTrayWndProc),

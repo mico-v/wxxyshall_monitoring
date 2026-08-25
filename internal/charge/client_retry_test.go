@@ -20,6 +20,12 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return fn(request) }
 
+func TestNewClientDoesNotUseLimiter(t *testing.T) {
+	if client := NewClient("https://example.test", "token"); client.limiter != nil {
+		t.Fatal("discovery client must not use the collection rate limiter")
+	}
+}
+
 func (l *countLimiter) Wait(context.Context) error {
 	l.mu.Lock()
 	l.waits++

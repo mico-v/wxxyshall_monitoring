@@ -39,7 +39,7 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
 - `port`：网页端口，范围 `1024..65535`；
 - `base_url`：学校服务地址，通常无需修改；
 - `poll_interval_minutes`：全局采集间隔，范围 `1..10080` 分钟；
-- `rate_limit_per_minute`：学校接口请求速率，范围 `1..600`；
+- `rate_limit_per_minute`：定时和手动电费采集的学校接口请求速率，范围 `1..600`；网页添加宿舍时使用的校区、楼栋、房间发现接口不受此项限制，由进程内缓存和并发合并管理；
 - `targets`：监控宿舍列表，数组顺序也是网页和手动批量采集顺序；
 - `show_in_web`：可省略，默认 `true`。设为 `false` 后仍采集和入库，但不出现在公开网页、公开读数接口和 SSE；
 - 宿舍内的 `poll_interval_minutes`：可省略。设置后覆盖该宿舍的全局采集间隔；
