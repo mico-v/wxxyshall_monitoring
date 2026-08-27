@@ -2,6 +2,7 @@ package web
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -130,7 +131,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/buildings", s.requireAdmin(s.handleDiscover))
 	mux.HandleFunc("GET /api/rooms", s.requireAdmin(s.handleDiscover))
 	mux.HandleFunc("POST /api/token", s.requireAdmin(s.handlePushToken))
-	mux.HandleFunc("POST /api/admin/verify", s.requireAdmin(s.handleAdminVerify))
+	// 密钥校验始终严格执行；即使管理接口鉴权关闭，隐藏主页仍用它解锁。
+	mux.HandleFunc("POST /api/admin/verify", s.requireAdminKey(s.handleAdminVerify))
 
 	// 静态文件
 	mux.HandleFunc("GET /static/", s.handleStatic)
@@ -153,7 +155,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		s.handle404(w, r)
 		return
 	}
-	s.serveHTML(w, "webapp.html")
+	s.serveWebApp(w, s.cfgHub.Config().IsHomepageShown())
 }
 
 func (s *Server) handleRoom(w http.ResponseWriter, r *http.Request) {
@@ -174,7 +176,8 @@ func (s *Server) handleRoom(w http.ResponseWriter, r *http.Request) {
 		s.serve404(w)
 		return
 	}
-	s.serveHTML(w, "webapp.html")
+	// 单宿舍页面始终公开加载；show_homepage 只控制返回主页入口和聚合数据。
+	s.serveWebApp(w, true)
 }
 
 // ---- API 处理器 ----
@@ -225,6 +228,33 @@ func (h *healthTTL) set(now time.Time, healthy bool) {
 }
 
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
+	campus, building, room := r.URL.Query().Get("campus"), r.URL.Query().Get("building"), r.URL.Query().Get("room")
+	if len(campus) > 128 || len(building) > 128 || len(room) > 128 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "campus/building/room 参数过长"})
+		return
+	}
+	roomScoped := campus != "" || building != "" || room != ""
+	if roomScoped {
+		if campus == "" || building == "" || room == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "campus/building/room 必须同时提供"})
+			return
+		}
+		visible := false
+		for _, target := range s.cfgHub.Config().GetWebTargets() {
+			if target.Campus == campus && target.Building == building && target.Room == room {
+				visible = true
+				break
+			}
+		}
+		if !visible {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "宿舍不存在或未公开"})
+			return
+		}
+	} else if !s.cfgHub.Config().IsHomepageShown() && !s.checkAdminKey(r) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="elec-home"`)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "主页已隐藏，需要管理密钥"})
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Streaming not supported"})
@@ -273,6 +303,12 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 				// SSE Hub 已关闭（服务器优雅关闭）
 				return
 			}
+			if roomScoped && evt.Event == "reading" {
+				reading, ok := evt.Data.(ReadingEvent)
+				if !ok || reading.Campus != campus || reading.Building != building || reading.Room != room {
+					continue
+				}
+			}
 			data, err := MarshalEvent(evt)
 			if err != nil {
 				continue
@@ -316,6 +352,11 @@ func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
 	}
 	if roomFilters != 0 && roomFilters != 3 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "campus/building/room 必须同时提供"})
+		return
+	}
+	if roomFilters == 0 && !s.cfgHub.Config().IsHomepageShown() && !s.checkAdminKey(r) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="elec-home"`)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "主页已隐藏，需要管理密钥"})
 		return
 	}
 
@@ -383,24 +424,41 @@ func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfgHub.Config()
-	authorized := s.checkAdminKey(r)
-	if adminCredentialProvided(r) && !authorized {
+	keyAuthorized := s.checkAdminKey(r)
+	if adminCredentialProvided(r) && !keyAuthorized {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="elec-admin"`)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "管理密钥无效"})
 		return
 	}
-	out := map[string]any{
-		"targets":             cfg.GetWebTargets(),
-		"defaults":            map[string]int{"feeitemid": config.DefaultFeeItemID, "appId": config.DefaultAppID},
-		"admin_auth_required": true,
+	managementView := keyAuthorized || (!cfg.AdminAuthEnabled && r.URL.Query().Get("admin") == "1")
+	publicTargets := cfg.GetWebTargets()
+	if !cfg.IsHomepageShown() && !managementView {
+		publicTargets = nil
+		campus, building, room := r.URL.Query().Get("campus"), r.URL.Query().Get("building"), r.URL.Query().Get("room")
+		if campus != "" && building != "" && room != "" {
+			for _, target := range cfg.GetWebTargets() {
+				if target.Campus == campus && target.Building == building && target.Room == room {
+					publicTargets = []config.Target{target}
+					break
+				}
+			}
+		}
 	}
-	if authorized {
+	out := map[string]any{
+		"targets":             publicTargets,
+		"defaults":            map[string]int{"feeitemid": config.DefaultFeeItemID, "appId": config.DefaultAppID},
+		"admin_auth_required": cfg.AdminAuthEnabled,
+		"show_homepage":       cfg.IsHomepageShown(),
+	}
+	if managementView {
 		out["targets"] = cfg.GetTargets()
 		out["username"] = cfg.Username
 		out["port"] = cfg.Port
 		out["base_url"] = cfg.BaseURL
 		out["poll_interval_minutes"] = cfg.PollIntervalMin
 		out["rate_limit_per_minute"] = cfg.RateLimitPerMinute
+		out["admin_auth_enabled"] = cfg.AdminAuthEnabled
+		out["show_homepage"] = cfg.IsHomepageShown()
 		out["port_change_requires_restart"] = true
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -415,6 +473,8 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		Target             *config.Target   `json:"target"`
 		PollIntervalMin    *int             `json:"poll_interval_minutes"`
 		RateLimitPerMinute *int             `json:"rate_limit_per_minute"`
+		AdminAuthEnabled   *bool            `json:"admin_auth_enabled"`
+		ShowHomepage       *bool            `json:"show_homepage"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeJSON(w, jsonDecodeStatus(err), map[string]string{"error": "JSON 解析失败: " + err.Error()})
@@ -448,7 +508,8 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Target != nil {
 		if body.Username != nil || body.Port != nil || body.BaseURL != nil || body.Targets != nil ||
-			body.PollIntervalMin != nil || body.RateLimitPerMinute != nil {
+			body.PollIntervalMin != nil || body.RateLimitPerMinute != nil ||
+			body.AdminAuthEnabled != nil || body.ShowHomepage != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target 不能与其他配置字段同时提交"})
 			return
 		}
@@ -514,6 +575,13 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.RateLimitPerMinute != nil {
 			cfg.RateLimitPerMinute = *body.RateLimitPerMinute
+		}
+		if body.AdminAuthEnabled != nil {
+			cfg.AdminAuthEnabled = *body.AdminAuthEnabled
+		}
+		if body.ShowHomepage != nil {
+			value := *body.ShowHomepage
+			cfg.ShowHomepage = &value
 		}
 		return nil
 	})
@@ -857,21 +925,25 @@ func (s *Server) serveFile(filename, ctype string) http.HandlerFunc {
 	}
 }
 
-func (s *Server) serveHTML(w http.ResponseWriter, filename string) {
-	data, err := readEmbeddedFile(filename)
+func (s *Server) serveWebApp(w http.ResponseWriter, homepageShown bool) {
+	data, err := readEmbeddedFile("webapp.html")
 	if err != nil {
-		// 回退到磁盘读取
-		fullPath := filepath.Join(s.rootDir, filename)
+		fullPath := filepath.Join(s.rootDir, "webapp.html")
 		data, err = os.ReadFile(fullPath)
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
 		}
 	}
+	value := "true"
+	if !homepageShown {
+		value = "false"
+	}
+	data = bytes.Replace(data, []byte(`<body data-show-homepage="true">`), []byte(`<body data-show-homepage="`+value+`">`), 1)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Write(data)
+	_, _ = w.Write(data)
 }
 
 func (s *Server) handle404(w http.ResponseWriter, r *http.Request) {
@@ -901,6 +973,21 @@ func (s *Server) serve404(w http.ResponseWriter) {
 // ---- 中间件/辅助 ----
 
 func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.cfgHub.Config().AdminAuthEnabled {
+			next(w, r)
+			return
+		}
+		if !s.checkAdminKey(r) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="elec-admin"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "管理密钥无效"})
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) requireAdminKey(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.checkAdminKey(r) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="elec-admin"`)

@@ -7,8 +7,8 @@
 用法:
   python3 login.py                                      # 保存到 token.json（或 ELEc_DIR/data/token.json）
   python3 login.py --output /opt/elec/data/token.json    # 指定本地保存位置
-  python3 login.py --push http://服务器:8080             # 存本地 + 推送到服务器
-  python3 login.py --push http://服务器:8080 --push-only # 只推送，不在本地落盘
+  python3 login.py --push http://服务器:5009             # 存本地 + 推送到服务器
+  python3 login.py --push http://服务器:5009 --push-only # 只推送，不在本地落盘
   python3 login.py --browser /usr/bin/chromium           # 指定浏览器路径
 
 环境变量:

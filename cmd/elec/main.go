@@ -114,9 +114,9 @@ func linuxHelpText() string {
 
 首次使用:
   1. sudo ./elec install     # 安装到系统
-  2. 浏览器打开 http://服务器IP:8080
+  2. 浏览器打开 http://服务器IP:5009
   3. 在「查询设置」中添加要监控的宿舍
-  4. 本地运行 python3 login.py --push http://服务器IP:8080
+  4. 本地运行 python3 login.py --push http://服务器IP:5009
 `
 }
 
@@ -367,7 +367,7 @@ func cmdRun() {
 
 	port := hub.Config().Port
 	if port <= 0 {
-		port = 8080
+		port = config.DefaultPort
 	}
 
 	addr := platformListenAddr(port)

@@ -122,3 +122,22 @@ func TestConfigDefaults(t *testing.T) {
 		t.Fatalf("expected /tmp/elec-test/data, got %q", got)
 	}
 }
+
+func TestConfigNewDefaultsAndLegacyHomepageCompatibility(t *testing.T) {
+	cfg, err := parseConfig([]byte(`{
+  "username":"u","base_url":"https://example.com","targets":[],
+  "poll_interval_minutes":60,"rate_limit_per_minute":30
+}`), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Port != 5009 {
+		t.Fatalf("default port = %d, want 5009", cfg.Port)
+	}
+	if cfg.AdminAuthEnabled {
+		t.Fatal("admin auth should default to disabled")
+	}
+	if !cfg.IsHomepageShown() {
+		t.Fatal("omitted show_homepage should default to true")
+	}
+}

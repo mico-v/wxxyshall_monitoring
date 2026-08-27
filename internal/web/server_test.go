@@ -25,7 +25,8 @@ func newTestServer(t *testing.T) *Server {
 	cfg := &config.Config{
 		Username: "20260001", Port: 8080, BaseURL: config.DefaultBaseURL,
 		PollIntervalMin: 60, RateLimitPerMinute: 30,
-		Targets: []config.Target{{FeeItemID: 409, AppID: 34, Campus: "A", Building: "B", Room: "C", Label: "one"}},
+		AdminAuthEnabled: true,
+		Targets:          []config.Target{{FeeItemID: 409, AppID: 34, Campus: "A", Building: "B", Room: "C", Label: "one"}},
 	}
 	if err := config.SaveConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -119,6 +120,74 @@ func TestAdminKeyAcceptedFromQueryParameter(t *testing.T) {
 	handler.ServeHTTP(invalid, httptest.NewRequest(http.MethodPost, "/api/admin/verify?key=0000000000000000", nil))
 	if invalid.Code != http.StatusUnauthorized {
 		t.Fatalf("invalid query key status = %d", invalid.Code)
+	}
+}
+
+func TestAdminAuthCanBeDisabledButKeyVerificationRemainsStrict(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
+		cfg.AdminAuthEnabled = false
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler := server.Handler()
+
+	mutation := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"rate_limit_per_minute":45}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(mutation, req)
+	if mutation.Code != http.StatusOK {
+		t.Fatalf("auth-disabled mutation status = %d body=%s", mutation.Code, mutation.Body.String())
+	}
+
+	verify := httptest.NewRecorder()
+	handler.ServeHTTP(verify, httptest.NewRequest(http.MethodPost, "/api/admin/verify", nil))
+	if verify.Code != http.StatusUnauthorized {
+		t.Fatalf("key verification without key = %d, want 401", verify.Code)
+	}
+}
+
+func TestHiddenHomepageRequiresKeyForAggregateDataButKeepsRoomPublic(t *testing.T) {
+	server := newTestServer(t)
+	hidden := false
+	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
+		cfg.ShowHomepage = &hidden
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler := server.Handler()
+
+	root := httptest.NewRecorder()
+	handler.ServeHTTP(root, httptest.NewRequest(http.MethodGet, "/", nil))
+	if root.Code != http.StatusOK || !strings.Contains(root.Body.String(), `data-show-homepage="false"`) {
+		t.Fatalf("hidden homepage shell status=%d marker=%v", root.Code, strings.Contains(root.Body.String(), `data-show-homepage="false"`))
+	}
+
+	aggregate := httptest.NewRecorder()
+	handler.ServeHTTP(aggregate, httptest.NewRequest(http.MethodGet, "/api/readings", nil))
+	if aggregate.Code != http.StatusUnauthorized {
+		t.Fatalf("aggregate readings status = %d, want 401", aggregate.Code)
+	}
+	authorizedAggregate := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/readings", nil)
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	handler.ServeHTTP(authorizedAggregate, req)
+	if authorizedAggregate.Code != http.StatusOK {
+		t.Fatalf("authorized aggregate readings status = %d body=%s", authorizedAggregate.Code, authorizedAggregate.Body.String())
+	}
+
+	room := httptest.NewRecorder()
+	handler.ServeHTTP(room, httptest.NewRequest(http.MethodGet, "/api/readings?campus=A&building=B&room=C", nil))
+	if room.Code != http.StatusOK {
+		t.Fatalf("room readings status = %d body=%s", room.Code, room.Body.String())
+	}
+
+	events := httptest.NewRecorder()
+	handler.ServeHTTP(events, httptest.NewRequest(http.MethodGet, "/api/events", nil))
+	if events.Code != http.StatusUnauthorized {
+		t.Fatalf("aggregate events status = %d, want 401", events.Code)
 	}
 }
 
@@ -220,7 +289,7 @@ func TestWebappSettingsOnlyExposeDormitoryAddition(t *testing.T) {
 		t.Fatal(err)
 	}
 	html := string(data)
-	for _, required := range []string{`id="target-list"`, `id="pick-campus"`, `id="pick-building"`, `id="pick-room"`, `id="pick-add"`} {
+	for _, required := range []string{`id="target-section"`, `id="target-list"`, `id="pick-campus"`, `id="pick-building"`, `id="pick-room"`, `id="pick-add"`} {
 		if !strings.Contains(html, required) {
 			t.Errorf("settings UI omitted %s", required)
 		}
@@ -231,6 +300,40 @@ func TestWebappSettingsOnlyExposeDormitoryAddition(t *testing.T) {
 	} {
 		if strings.Contains(html, forbidden) {
 			t.Errorf("settings UI still exposes %s", forbidden)
+		}
+	}
+}
+
+func TestWebappHasAdditionOnlySettingsAndImmediateCascadeResetLogic(t *testing.T) {
+	data, err := readEmbeddedFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(data)
+	for _, required := range []string{
+		`function settingsAdditionOnly()`,
+		`document.getElementById("target-section").hidden = additionOnly`,
+		`fillSelect(selB, [], "— 选择楼栋 —", true)`,
+		`fillSelect(selR, [], "— 选择房间 —", true)`,
+		`requestSeq !== buildingRequestSeq`,
+		`requestSeq !== roomRequestSeq`,
+		`navigate({ campus: t.campus, building: t.building, room: t.room, label: t.label })`,
+	} {
+		if !strings.Contains(js, required) {
+			t.Errorf("app.js omitted behavior marker %q", required)
+		}
+	}
+}
+
+func TestWebappContainsReadingPaginationControls(t *testing.T) {
+	data, err := readEmbeddedFile("webapp.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(data)
+	for _, required := range []string{`id="table-page-size"`, `value="10"`, `id="table-prev"`, `id="table-next"`} {
+		if !strings.Contains(html, required) {
+			t.Errorf("pagination UI omitted %s", required)
 		}
 	}
 }
@@ -527,7 +630,7 @@ func TestPWAAssetsAreEmbeddedAndConsistent(t *testing.T) {
 
 	swRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(swRecorder, httptest.NewRequest(http.MethodGet, "/sw.js", nil))
-	if swRecorder.Code != http.StatusOK || !strings.Contains(swRecorder.Body.String(), "`${CACHE_PREFIX}v9`") {
+	if swRecorder.Code != http.StatusOK || !strings.Contains(swRecorder.Body.String(), "`${CACHE_PREFIX}v10`") {
 		t.Fatalf("service worker response invalid: status=%d", swRecorder.Code)
 	}
 	if got := swRecorder.Header().Get("Cache-Control"); got != "no-cache" {

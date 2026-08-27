@@ -12,9 +12,10 @@
 - 网页“查询设置”中的校区、楼栋和房间发现不占用电费采集的 `rate_limit_per_minute`；结果按查询参数缓存在进程内，后续访问直接读取内存，相同的并发首次查询只请求学校接口一次。
 - 配置和 token 支持安全热重载；采集间隔、限流和目标顺序无需重启，已打开的仪表盘会在 30 秒内同步公开目标配置，端口变化需重启。
 - 历史文件不自动清理；查询接口只返回符合条件的最新 10,000 条，按时间正序展示。
+- 单宿舍读数明细默认每页 10 条，可切换每页数量并使用上一页/下一页浏览。
 - 仪表盘按 `config.json` 中的目标顺序显示和采集。网页“查询设置”只提供级联添加宿舍；其他字段、排序和已有宿舍调整统一手工编辑 `config.json`。
 - PWA 可安装，离线时使用最近缓存的公开配置和读数；管理请求和带鉴权请求绝不缓存。
-- 所有修改、采集、发现、任务状态/取消和 token 推送接口都需要管理密钥。
+- 可通过 `admin_auth_enabled` 控制修改、采集、发现、任务状态/取消和 token 推送接口是否需要管理密钥。
 
 项目没有自动更新功能。升级由管理员替换二进制并重启服务完成。
 
@@ -113,7 +114,7 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
 
 GitHub Actions 位于 `.github/workflows/release.yml`。推送到 `main` 会构建并上传 Linux amd64/arm64、Windows amd64 工件；推送 `v*` 标签还会自动创建 GitHub Release 并附加压缩包。
 
-首次运行会生成 `$ELEc_DIR/data/config.json` 和 `$ELEc_DIR/data/.admin_key`。打开 `http://localhost:8080`，进入“查询设置”时输入管理密钥，即可级联选择并添加宿舍。也可直接打开 `http://localhost:8080/?key=<管理密钥>`；网页读取后会把 `key` 从地址栏移除，并只保存到当前标签页的 `sessionStorage`。
+首次运行会生成 `$ELEc_DIR/data/config.json` 和 `$ELEc_DIR/data/.admin_key`。默认打开 `http://localhost:5009`；`admin_auth_enabled` 默认关闭，开启后进入“查询设置”需输入管理密钥。也可直接打开 `http://localhost:5009/?key=<管理密钥>`；网页读取后会把 `key` 从地址栏移除，并只保存到当前标签页的 `sessionStorage`。
 
 ### systemd 安装
 
@@ -146,7 +147,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 ```json
 {
   "username": "学号",
-  "port": 8080,
+  "port": 5009,
   "base_url": "https://wxxyshall.usts.edu.cn",
   "targets": [
     {
@@ -161,7 +162,9 @@ elec config       # 显示密钥文件位置，不直接打印密钥
     }
   ],
   "poll_interval_minutes": 60,
-  "rate_limit_per_minute": 30
+  "rate_limit_per_minute": 30,
+  "admin_auth_enabled": false,
+  "show_homepage": true
 }
 ```
 
@@ -171,6 +174,8 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 - `base_url` 必须是有效的 HTTP/HTTPS 地址。
 - `poll_interval_minutes` 为 `1..10080`。
 - `rate_limit_per_minute` 为 `1..600`。例如 `30` 表示任意两次学校 HTTP 请求至少间隔 2 秒，并非一分钟突发 30 次。
+- `admin_auth_enabled` 默认 `false`；开启后管理 API 需要密钥。无论是否开启，程序仍会生成 `.admin_key`，密钥验证接口也始终严格校验。
+- `show_homepage` 默认 `true`；关闭后主页要求输入管理密钥才加载聚合数据，单宿舍页不再显示返回主页按钮。它与 `admin_auth_enabled` 同时关闭时，单宿舍页的查询设置仅允许添加宿舍，添加成功后自动跳转。
 - 每个目标的 `feeitemid`、`appId` 必须为正整数，`campus/building/room` 非空且组合不可重复。
 - 目标的 `show_in_web` 可省略，默认 `true`；设为 `false` 后仍会定时/手动采集，但不会出现在公开配置、读数、宿舍页面或 SSE 中。
 - 目标的 `poll_interval_minutes` 可省略；省略时继承全局 `poll_interval_minutes`，设置后以该宿舍的 `1..10080` 分钟周期覆盖全局值。
@@ -180,8 +185,8 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 
 ## 安全边界
 
-- 管理密钥存放于数据目录的 `.admin_key`，服务启动时读取；不会写入 `config.json` 或 systemd unit。
-- 浏览器只把密钥放在 `sessionStorage`，关闭标签页后失效。公开仪表盘、读数和读数 SSE 不需要密钥。
+- 管理密钥存放于数据目录的 `.admin_key`，服务启动时读取；不会写入 `config.json` 或 systemd unit，即使 `admin_auth_enabled=false` 也依然生成。
+- 浏览器只把密钥放在 `sessionStorage`，关闭标签页后失效。单宿舍仪表盘和读数保持公开；`show_homepage=false` 时聚合主页和聚合读数需要密钥。
 - 管理 API 使用 `Authorization: Bearer <key>`，也接受 `?key=<key>`。生产部署建议放在 HTTPS 反向代理后；查询参数可能出现在代理访问日志中，应限制日志访问并避免分享含密钥的原始链接。
 - JSON 请求限制为 1 MiB、拒绝未知字段和多余 JSON；配置、token 使用临时文件 + `fsync` + 原子替换保存。
 - 默认安装服务不以 root 运行，数据目录及敏感文件采用受限权限。
@@ -195,11 +200,11 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 |---|---|---|
 | GET | `/`, `/room/{campus}/{building}/{room}` | 仪表盘 |
 | GET | `/api/health` | 服务和数据库健康状态 |
-| GET | `/api/readings?days&campus&building&room` | 最新最多 10,000 条读数 |
+| GET | `/api/readings?days&campus&building&room` | 最新最多 10,000 条读数；隐藏主页时无宿舍参数的聚合查询需密钥 |
 | GET | `/api/config` | 目标顺序、默认 fee item/app ID；不暴露服务敏感配置 |
 | GET | `/api/events` | 新读数 SSE |
 
-需要 Bearer 管理密钥：
+`admin_auth_enabled=true` 时需要 Bearer 管理密钥（关闭时可直接调用，但 `/api/admin/verify` 始终需要正确密钥）：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -214,7 +219,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 
 接口字段约定：
 
-- `POST /api/config` 接受配置章节列出的六个顶层字段并支持部分更新；网页添加宿舍时也可单独提交 `{"target": {...}}`。新宿舍追加到列表末尾；重复宿舍只原位更新 `label`，保留其 `feeitemid`、`appId` 和顺序，不覆盖其他配置。`target` 不能与其他配置字段混用；未知字段或无效范围会返回 `400`。
+- `POST /api/config` 接受配置章节列出的顶层字段并支持部分更新；网页添加宿舍时也可单独提交 `{"target": {...}}`。新宿舍追加到列表末尾；重复宿舍只原位更新 `label`，保留其 `feeitemid`、`appId` 和顺序，不覆盖其他配置。`target` 不能与其他配置字段混用；未知字段或无效范围会返回 `400`。
 - `POST /api/collect` 请求体为 `{"campus":"...","building":"...","room":"..."}`；三个字段必须同时提供且目标必须已配置。空对象表示采集配置第一项。
 - 发现接口使用查询参数 `feeitemid`、`appId`；楼栋接口另需 `campus`，房间接口另需 `campus`、`building`。这些请求不受 `rate_limit_per_minute` 限制；成功结果按 `base_url + feeitemid + appId + 层级参数` 缓存到当前进程，直到服务重启；相同并发请求会合并，错误不缓存，`base_url` 变化会使用新的缓存键。
 - 批量任务状态为 `queued`、`running`、`cancelling`、`cancelled`、`done` 或 `failed`。运行中状态只返回进度计数，终态返回完整 `results`；取消必须传启动接口返回的同一个 `job_id`。

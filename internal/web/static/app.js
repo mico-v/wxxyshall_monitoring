@@ -46,9 +46,22 @@ function scheduleReadingRefresh() {
 }
 
 function connectSSE() {
-  if (eventSource) { eventSource.close(); }
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  sseConnected = false;
+  if (!state.room && !state.showHomepage) {
+    startPollingFallback();
+    return;
+  }
+  stopPollingFallback();
+  const q = new URLSearchParams();
+  if (state.room) {
+    q.set("campus", state.room.campus);
+    q.set("building", state.room.building);
+    q.set("room", state.room.room);
+  }
+  const eventURL = "/api/events" + (q.toString() ? "?" + q.toString() : "");
   try {
-    eventSource = new EventSource('/api/events');
+    eventSource = new EventSource(eventURL);
   } catch (e) {
     console.warn('SSE 初始化失败:', e);
     startPollingFallback();
@@ -158,6 +171,11 @@ let state = {
   targets: [],        // 来自 /api/config
   defaults: { feeitemid: 409, appId: 34 },
   room: null,         // 当前查看的宿舍 {campus,building,room,label},null=全部
+  adminAuthRequired: false,
+  showHomepage: true,
+  homepageUnlocked: false,
+  tablePage: 1,
+  tablePageSize: 10,
 };
 
 /* ============ 路径导航(History API) ============ */
@@ -177,14 +195,21 @@ function pathFor(room) {
 }
 function navigate(room, replace = false) {
   state.room = room;
+  state.tablePage = 1;
   window.scrollTo(0, 0);
   history[replace ? "replaceState" : "pushState"]({ room }, "", pathFor(room));
   refresh();
+  connectSSE();
 }
-window.addEventListener("popstate", () => {   // 浏览器前进/后退
+window.addEventListener("popstate", async () => {   // 浏览器前进/后退
   state.room = roomFromPath();
+  state.tablePage = 1;
   window.scrollTo(0, 0);
+  if (!state.room && !state.showHomepage && !state.homepageUnlocked) {
+    await unlockHomepage();
+  }
   refresh();
+  connectSSE();
 });
 
 function readingsURL() {
@@ -200,20 +225,47 @@ function readingsURL() {
 }
 
 async function fetchReadings() {
-  const r = await fetch(readingsURL(), { cache: "no-store" });
+  const headers = new Headers();
+  if (!state.room && !state.showHomepage) {
+    if (!state.homepageUnlocked || !adminKey) throw new Error("主页需要管理密钥");
+    headers.set("Authorization", `Bearer ${adminKey}`);
+  }
+  const r = await fetch(readingsURL(), { cache: "no-store", headers });
   if (!r.ok) throw new Error("HTTP " + r.status);
   return await r.json();
 }
 
 async function refreshPublicConfig() {
-  const r = await fetch("/api/config", { cache: "no-store" });
+  const q = new URLSearchParams();
+  if (state.room) {
+    q.set("campus", state.room.campus);
+    q.set("building", state.room.building);
+    q.set("room", state.room.room);
+  }
+  const headers = new Headers();
+  if (!state.room && state.homepageUnlocked && adminKey) {
+    headers.set("Authorization", `Bearer ${adminKey}`);
+  }
+  const suffix = q.toString();
+  const r = await fetch("/api/config" + (suffix ? "?" + suffix : ""), { cache: "no-store", headers });
   if (!r.ok) throw new Error("HTTP " + r.status);
   const cfg = await r.json();
   const nextTargets = cfg.targets || [];
   const changed = JSON.stringify(nextTargets) !== JSON.stringify(state.targets);
+  const previousHomepageVisibility = state.showHomepage;
   state.targets = nextTargets;
   if (cfg.defaults) state.defaults = cfg.defaults;
+  state.adminAuthRequired = cfg.admin_auth_required === true;
+  state.showHomepage = cfg.show_homepage !== false;
+  if (!state.room) {
+    document.body.dataset.showHomepage = String(state.showHomepage);
+    if (!state.showHomepage && !state.homepageUnlocked) {
+      document.body.classList.remove("homepage-unlocked");
+    }
+  }
   if (changed && state.data.length) render();
+  else if (previousHomepageVisibility !== state.showHomepage) renderBackButton();
+  if (previousHomepageVisibility !== state.showHomepage && (eventSource || pollTimer)) connectSSE();
   return cfg;
 }
 
@@ -221,7 +273,13 @@ let configPollTimer = null;
 function startConfigPolling() {
   if (configPollTimer) clearInterval(configPollTimer);
   configPollTimer = setInterval(() => {
-    refreshPublicConfig().catch(e => console.warn("配置刷新失败:", e));
+    refreshPublicConfig().then(async () => {
+      if (!state.room && !state.showHomepage && !state.homepageUnlocked) {
+        await unlockHomepage();
+        await refreshPublicConfig();
+        await refresh();
+      }
+    }).catch(e => console.warn("配置刷新失败:", e));
   }, 30000);
 }
 
@@ -265,7 +323,7 @@ function render() {
 
 function renderBackButton() {
   const btn = document.getElementById("back-btn");
-  if (btn) btn.hidden = !state.room;
+  if (btn) btn.hidden = !state.room || !state.showHomepage;
 }
 
 function renderKpis() {
@@ -545,7 +603,16 @@ function renderTable() {
   const wrap = document.getElementById("table-wrap");
   const hint = document.getElementById("table-hint");
   const multi = state.groups.length > 1;
-  hint.textContent = data.length ? `${data.length} 条` : "—";
+  const pageSize = state.tablePageSize;
+  const pageCount = Math.max(1, Math.ceil(data.length / pageSize));
+  state.tablePage = Math.min(Math.max(1, state.tablePage), pageCount);
+  hint.textContent = data.length ? `${data.length} 条 · 第 ${state.tablePage}/${pageCount} 页` : "—";
+  const prev = document.getElementById("table-prev");
+  const next = document.getElementById("table-next");
+  const pageInfo = document.getElementById("table-page-info");
+  if (prev) prev.disabled = state.tablePage <= 1;
+  if (next) next.disabled = state.tablePage >= pageCount || !data.length;
+  if (pageInfo) pageInfo.textContent = data.length ? `${state.tablePage} / ${pageCount}` : "0 / 0";
   if (!data.length) {
     wrap.innerHTML = '<div class="empty">暂无读数</div>';
     return;
@@ -566,8 +633,9 @@ function renderTable() {
   table.appendChild(thead);
 
   const tbody = document.createElement("tbody");
-  for (let i = data.length - 1; i >= 0; i--) {
-    const d = data[i];
+  const newestFirst = data.slice().reverse();
+  const start = (state.tablePage - 1) * pageSize;
+  for (const d of newestFirst.slice(start, start + pageSize)) {
     const tr = document.createElement("tr");
     if (multi) {
       const tdR = document.createElement("td");
@@ -600,13 +668,36 @@ function renderTable() {
 
 /* ============ 筛选 ============ */
 function initFilters() {
-  document.querySelectorAll("#filters button").forEach(btn => {
+  document.querySelectorAll("#filters button[data-days]").forEach(btn => {
     btn.addEventListener("click", () => {
-      document.querySelectorAll("#filters button").forEach(b => b.classList.remove("active"));
+      document.querySelectorAll("#filters button[data-days]").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
       state.days = parseInt(btn.dataset.days, 10);
+      state.tablePage = 1;
       refresh();
     });
+  });
+}
+
+function initTablePagination() {
+  const size = document.getElementById("table-page-size");
+  size.value = String(state.tablePageSize);
+  size.addEventListener("change", () => {
+    state.tablePageSize = parseInt(size.value, 10) || 10;
+    state.tablePage = 1;
+    renderTable();
+  });
+  document.getElementById("table-prev").addEventListener("click", () => {
+    if (state.tablePage > 1) {
+      state.tablePage--;
+      renderTable();
+    }
+  });
+  document.getElementById("table-next").addEventListener("click", () => {
+    if (state.tablePage * state.tablePageSize < state.data.length) {
+      state.tablePage++;
+      renderTable();
+    }
   });
 }
 
@@ -630,6 +721,7 @@ function initBackButton() {
 /* ============ 查询设置 ============ */
 let draftTargets = [];
 let pickCampus = null, pickBuilding = null, pickRoom = null;
+let campusRequestSeq = 0, buildingRequestSeq = 0, roomRequestSeq = 0;
 const ADMIN_KEY_SESSION = "elec-admin-key";
 let adminKey = sessionStorage.getItem(ADMIN_KEY_SESSION) || "";
 // 允许通过 /?key=... 直接打开管理页面；读取后立即从地址栏移除，避免密钥留在历史记录/复制链接中。
@@ -650,6 +742,7 @@ function initAdminPrompt() {
   const modal = document.getElementById("admin-modal");
   const input = document.getElementById("admin-key-input");
   const finish = value => {
+    if (modal.classList.contains("home-gate") && !value) return;
     modal.hidden = true;
     const resolve = adminPromptResolver;
     adminPromptResolver = null;
@@ -659,26 +752,36 @@ function initAdminPrompt() {
   document.getElementById("admin-cancel").addEventListener("click", () => finish(""));
   input.addEventListener("keydown", event => {
     if (event.key === "Enter") { event.preventDefault(); finish(input.value.trim()); }
-    if (event.key === "Escape") { event.preventDefault(); finish(""); }
+    if (event.key === "Escape" && !modal.classList.contains("home-gate")) { event.preventDefault(); finish(""); }
   });
-  modal.addEventListener("click", event => { if (event.target === modal) finish(""); });
+  modal.addEventListener("click", event => {
+    if (event.target === modal && !modal.classList.contains("home-gate")) finish("");
+  });
 }
 
-function promptAdminKey() {
+function promptAdminKey(required = false) {
   if (adminPromptResolver) return Promise.resolve("");
   const modal = document.getElementById("admin-modal");
   const input = document.getElementById("admin-key-input");
   input.value = "";
+  modal.classList.toggle("home-gate", required);
+  document.getElementById("admin-cancel").hidden = required;
+  document.getElementById("admin-title").textContent = required ? "主页访问验证" : "管理鉴权";
+  document.getElementById("admin-prompt-hint").textContent = required
+    ? "主页已隐藏，请输入管理鉴权密钥后加载主页和数据。"
+    : "密钥只保存在当前浏览器标签页，关闭标签页后失效。";
   modal.hidden = false;
   setTimeout(() => input.focus(), 0);
   return new Promise(resolve => { adminPromptResolver = resolve; });
 }
 
 async function adminFetch(url, options = {}) {
-  if (!adminKey) throw new Error("需要管理密钥");
-  const headers = new Headers(options.headers || {});
-  headers.set("Authorization", `Bearer ${adminKey}`);
-  const response = await fetch(url, { ...options, headers, cache: options.cache || "no-store" });
+  const { forceAdminKey = false, ...fetchOptions } = options;
+  const headers = new Headers(fetchOptions.headers || {});
+  if (adminKey && (forceAdminKey || state.adminAuthRequired || state.homepageUnlocked)) {
+    headers.set("Authorization", `Bearer ${adminKey}`);
+  }
+  const response = await fetch(url, { ...fetchOptions, headers, cache: fetchOptions.cache || "no-store" });
   if (response.status === 401) {
     adminKey = "";
     sessionStorage.removeItem(ADMIN_KEY_SESSION);
@@ -697,26 +800,43 @@ async function responseJSON(response) {
 }
 
 async function ensureAdmin() {
+  if (!state.adminAuthRequired) return true;
+  return ensureAdminKey(false);
+}
+
+async function ensureAdminKey(required) {
   if (adminKey) {
     try {
-      await responseJSON(await adminFetch("/api/admin/verify", { method: "POST" }));
+      await responseJSON(await adminFetch("/api/admin/verify", { method: "POST", forceAdminKey: true }));
       return true;
     } catch (e) {
-      if (adminKey) throw e;
+      if (adminKey && !required) throw e;
     }
   }
-  const entered = await promptAdminKey();
-  if (!entered) return false;
-  adminKey = entered.trim();
-  try {
-    await responseJSON(await adminFetch("/api/admin/verify", { method: "POST" }));
-    sessionStorage.setItem(ADMIN_KEY_SESSION, adminKey);
-    return true;
-  } catch (e) {
-    adminKey = "";
-    sessionStorage.removeItem(ADMIN_KEY_SESSION);
-    throw e;
+  while (true) {
+    const entered = await promptAdminKey(required);
+    if (!entered) return false;
+    adminKey = entered.trim();
+    try {
+      await responseJSON(await adminFetch("/api/admin/verify", { method: "POST", forceAdminKey: true }));
+      sessionStorage.setItem(ADMIN_KEY_SESSION, adminKey);
+      return true;
+    } catch (e) {
+      adminKey = "";
+      sessionStorage.removeItem(ADMIN_KEY_SESSION);
+      if (!required) throw e;
+      toast("管理密钥无效，请重新输入", true);
+    }
   }
+}
+
+async function unlockHomepage() {
+  if (state.room || state.showHomepage || state.homepageUnlocked) return true;
+  const unlocked = await ensureAdminKey(true);
+  if (!unlocked) return false;
+  state.homepageUnlocked = true;
+  document.body.classList.add("homepage-unlocked");
+  return true;
 }
 
 function discoveryParams(extra = {}) {
@@ -739,29 +859,34 @@ function fillSelect(el, items, placeholder, disabled) {
 }
 
 async function loadCampuses() {
-  const d = await responseJSON(await adminFetch(`/api/campuses?${discoveryParams()}`));
-  fillSelect(document.getElementById("pick-campus"), d, "— 选择校区 —", false);
+  return responseJSON(await adminFetch(`/api/campuses?${discoveryParams()}`));
 }
 
 async function loadBuildings(campus) {
-  const d = await responseJSON(await adminFetch(`/api/buildings?${discoveryParams({ campus })}`));
-  fillSelect(document.getElementById("pick-building"), d, "— 选择楼栋 —", false);
+  return responseJSON(await adminFetch(`/api/buildings?${discoveryParams({ campus })}`));
 }
 
 async function loadRooms(campus, building) {
-  const d = await responseJSON(await adminFetch(`/api/rooms?${discoveryParams({ campus, building })}`));
-  fillSelect(document.getElementById("pick-room"), d, "— 选择房间 —", false);
+  return responseJSON(await adminFetch(`/api/rooms?${discoveryParams({ campus, building })}`));
 }
 
 function resetPicker() {
   pickCampus = pickBuilding = pickRoom = null;
-  fillSelect(document.getElementById("pick-campus"), [], "— 选择校区 —", false);
+  const requestSeq = ++campusRequestSeq;
+  buildingRequestSeq++;
+  roomRequestSeq++;
+  fillSelect(document.getElementById("pick-campus"), [], "— 加载校区 —", true);
   fillSelect(document.getElementById("pick-building"), [], "— 选择楼栋 —", true);
   fillSelect(document.getElementById("pick-room"), [], "— 选择房间 —", true);
   document.getElementById("pick-add").disabled = true;
   document.getElementById("pick-preview").textContent = "";
   document.getElementById("pick-tag").value = "";
-  loadCampuses().catch(e => {
+  loadCampuses().then(items => {
+    if (requestSeq !== campusRequestSeq) return;
+    fillSelect(document.getElementById("pick-campus"), items, "— 选择校区 —", false);
+  }).catch(e => {
+    if (requestSeq !== campusRequestSeq) return;
+    fillSelect(document.getElementById("pick-campus"), [], "— 选择校区 —", false);
     document.getElementById("pick-preview").textContent = "加载校区失败: " + e.message;
   });
 }
@@ -802,11 +927,22 @@ function renderTargetList() {
   });
 }
 
+function settingsAdditionOnly() {
+  return !!state.room && !state.adminAuthRequired && !state.showHomepage;
+}
+
 async function openSettings() {
   if (!await ensureAdmin()) return;
-  const cfg = await responseJSON(await adminFetch("/api/config"));
-  draftTargets = (cfg.targets || []).map(t => ({ ...t }));
-  renderTargetList();
+  const additionOnly = settingsAdditionOnly();
+  document.getElementById("target-section").hidden = additionOnly;
+  if (additionOnly) {
+    draftTargets = [];
+    document.getElementById("target-list").textContent = "";
+  } else {
+    const cfg = await responseJSON(await adminFetch("/api/config?admin=1"));
+    draftTargets = (cfg.targets || []).map(t => ({ ...t }));
+    renderTargetList();
+  }
   resetPicker();
   document.getElementById("settings-modal").hidden = false;
 }
@@ -827,28 +963,44 @@ function initSettings() {
     const opt = e.target.selectedOptions[0];
     pickCampus = opt.value ? { value: opt.value, name: opt.dataset.name } : null;
     pickBuilding = pickRoom = null;
+    const requestSeq = ++buildingRequestSeq;
+    roomRequestSeq++;
+    fillSelect(selB, [], "— 选择楼栋 —", true);
+    fillSelect(selR, [], "— 选择房间 —", true);
+    document.getElementById("pick-tag").value = "";
+    updatePreview();
     if (pickCampus) {
-      try { await loadBuildings(pickCampus.value); } catch (err) {
+      const campusValue = pickCampus.value;
+      try {
+        const items = await loadBuildings(campusValue);
+        if (requestSeq !== buildingRequestSeq || !pickCampus || pickCampus.value !== campusValue) return;
+        fillSelect(selB, items, "— 选择楼栋 —", false);
+      } catch (err) {
+        if (requestSeq !== buildingRequestSeq) return;
         document.getElementById("pick-preview").textContent = "加载楼栋失败: " + err.message;
       }
-    } else {
-      fillSelect(selB, [], "— 选择楼栋 —", true);
-      fillSelect(selR, [], "— 选择房间 —", true);
     }
-    updatePreview();
   });
   selB.addEventListener("change", async e => {
     const opt = e.target.selectedOptions[0];
     pickBuilding = opt.value ? { value: opt.value, name: opt.dataset.name } : null;
     pickRoom = null;
+    const requestSeq = ++roomRequestSeq;
+    fillSelect(selR, [], "— 选择房间 —", true);
+    document.getElementById("pick-tag").value = "";
+    updatePreview();
     if (pickBuilding) {
-      try { await loadRooms(pickCampus.value, pickBuilding.value); } catch (err) {
+      const campusValue = pickCampus.value;
+      const buildingValue = pickBuilding.value;
+      try {
+        const items = await loadRooms(campusValue, buildingValue);
+        if (requestSeq !== roomRequestSeq || !pickBuilding || pickBuilding.value !== buildingValue) return;
+        fillSelect(selR, items, "— 选择房间 —", false);
+      } catch (err) {
+        if (requestSeq !== roomRequestSeq) return;
         document.getElementById("pick-preview").textContent = "加载房间失败: " + err.message;
       }
-    } else {
-      fillSelect(selR, [], "— 选择房间 —", true);
     }
-    updatePreview();
   });
   selR.addEventListener("change", e => {
     const opt = e.target.selectedOptions[0];
@@ -872,11 +1024,17 @@ function initSettings() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ target: t }),
       }));
-      draftTargets = (body.targets || []).map(x => ({ ...x }));
-      renderTargetList();
-      document.getElementById("pick-preview").textContent = replacing ? "已更新宿舍 tag" : "已添加并自动保存";
-      await refreshPublicConfig();
-      await refresh();
+      if (settingsAdditionOnly()) {
+        modal.hidden = true;
+        navigate({ campus: t.campus, building: t.building, room: t.room, label: t.label });
+        await refreshPublicConfig();
+      } else {
+        draftTargets = (body.targets || []).map(x => ({ ...x }));
+        renderTargetList();
+        document.getElementById("pick-preview").textContent = replacing ? "已更新宿舍 tag" : "已添加并自动保存";
+        await refreshPublicConfig();
+        await refresh();
+      }
     } catch (e) {
       document.getElementById("pick-preview").textContent = "保存失败: " + e.message;
     } finally {
@@ -1023,7 +1181,7 @@ async function collectNow() {
 }
 
 async function resumeCollectJob() {
-  if (!activeJobId || !adminKey) return;
+  if (!activeJobId || (state.adminAuthRequired && !adminKey)) return;
   const jobId = activeJobId;
   const btn = document.getElementById("collect-btn");
   btn.disabled = true;
@@ -1049,34 +1207,38 @@ async function resumeCollectJob() {
 
 /* ============ 启动 ============ */
 async function boot() {
-  // 先尝试从缓存加载上次数据（离线可用）
-  if ('caches' in window) {
-    try {
-      const cachedConfig = await caches.match('/api/config');
-      if (cachedConfig) {
-      const cfg = await cachedConfig.json();
-        if (cfg && cfg.targets) state.targets = cfg.targets;
-        if (cfg && cfg.defaults) state.defaults = cfg.defaults;
-      }
-      state.room = roomFromPath();
-      const cachedReadings = await caches.match(readingsURL());
-      if (cachedReadings) {
-        const data = await cachedReadings.json();
-        if (data && data.length) {
-          state.data = data;
-          render();
-        }
-      }
-    } catch (e) { console.warn('缓存加载失败:', e); }
-  }
+  state.room = roomFromPath();
+  state.showHomepage = document.body.dataset.showHomepage !== "false";
 
-  // 再通过网络获取最新数据
+  // 服务端已把主页开关写入页面，关闭时先验证，绝不预载缓存或读数。
+  if (!state.room && !state.showHomepage) await unlockHomepage();
+
   try {
     await refreshPublicConfig();
-    state.room = roomFromPath();
+    if (!state.room && !state.showHomepage) await unlockHomepage();
     await refresh();
   } catch (e) {
-    console.warn('网络加载失败,使用缓存数据:', e);
+    console.warn('网络加载失败,尝试使用缓存数据:', e);
+    if ('caches' in window) {
+      try {
+        const cachedConfig = await caches.match('/api/config');
+        if (cachedConfig) {
+          const cfg = await cachedConfig.json();
+          if (cfg && cfg.targets) state.targets = cfg.targets;
+          if (cfg && cfg.defaults) state.defaults = cfg.defaults;
+          if (cfg) state.showHomepage = cfg.show_homepage !== false;
+        }
+        if (!state.room && !state.showHomepage) await unlockHomepage();
+        const cachedReadings = await caches.match(readingsURL());
+        if (cachedReadings) {
+          const data = await cachedReadings.json();
+          if (Array.isArray(data)) {
+            state.data = data;
+            render();
+          }
+        }
+      } catch (cacheError) { console.warn('缓存加载失败:', cacheError); }
+    }
   }
 
   // 连接 SSE 实时推送
@@ -1087,6 +1249,7 @@ async function boot() {
 initTheme();
 initFilters();
 initBackButton();
+initTablePagination();
 initAdminPrompt();
 initSettings();
 document.getElementById("collect-btn").addEventListener("click", collectNow);

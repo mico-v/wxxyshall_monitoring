@@ -65,6 +65,8 @@
                  "Microsoft YaHei", sans-serif;
     line-height: 1.5;
   }
+  body[data-show-homepage="false"] #app-shell { display: none; }
+  body[data-show-homepage="false"].homepage-unlocked #app-shell { display: block; }
   .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 20px 48px; min-width: 0; }
   @media (max-width: 480px) { .wrap { padding: 16px 12px 36px; } }
 
@@ -150,6 +152,7 @@
     display: flex; align-items: flex-start; justify-content: center;
     padding: 8vh 16px 24px;
   }
+  .modal-overlay.home-gate { align-items: center; padding-top: 24px; }
   .modal-overlay[hidden] { display: none; }
   .modal {
     background: var(--surface); border: 1px solid var(--border);
@@ -219,7 +222,17 @@
   .card .card-hd h2 { font-size: 15px; font-weight: 650; margin: 0; }
   .card .card-hd .hint { font-size: 12px; color: var(--ink-3); }
   .card .card-bd { padding: 12px 18px 16px; min-width: 0; }
-  #detail-card .card-bd { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .pagination {
+    display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+    margin-top: 12px; color: var(--ink-2); font-size: 12px; flex-wrap: wrap;
+  }
+  .pagination label { display: inline-flex; align-items: center; gap: 6px; }
+  .pagination select {
+    font: inherit; color: var(--ink-1); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 7px; padding: 5px 7px;
+  }
+  .pagination button:disabled { opacity: .4; cursor: default; }
 
   /* ---- 图表(Canvas) ---- */
   .chart-holder { position: relative; }
@@ -321,8 +334,8 @@
   }
 </style>
 </head>
-<body>
-<div class="wrap">
+<body data-show-homepage="true">
+<div class="wrap" id="app-shell">
   <header class="top">
     <div>
       <h1>宿舍电费监控</h1>
@@ -368,7 +381,22 @@
         <h2>读数明细</h2>
         <span class="hint" id="table-hint">—</span>
       </div>
-      <div class="card-bd" id="table-wrap"></div>
+      <div class="card-bd">
+        <div class="table-scroll" id="table-wrap"></div>
+        <div class="pagination" aria-label="读数明细分页">
+          <label for="table-page-size">每页
+            <select id="table-page-size">
+              <option value="10">10 条</option>
+              <option value="20">20 条</option>
+              <option value="50">50 条</option>
+              <option value="100">100 条</option>
+            </select>
+          </label>
+          <button class="theme-btn" id="table-prev" type="button">上一页</button>
+          <span id="table-page-info">0 / 0</span>
+          <button class="theme-btn" id="table-next" type="button">下一页</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -383,7 +411,7 @@
       <label class="field">管理密钥
         <input id="admin-key-input" type="password" autocomplete="new-password" maxlength="256" spellcheck="false">
       </label>
-      <div class="label-hint">密钥只保存在当前浏览器标签页，关闭标签页后失效。</div>
+      <div class="label-hint" id="admin-prompt-hint">密钥只保存在当前浏览器标签页，关闭标签页后失效。</div>
       <div class="settings-actions">
         <button id="admin-cancel" class="theme-btn" type="button">取消</button>
         <button id="admin-submit" class="btn" type="button">验证</button>
@@ -400,8 +428,10 @@
       <button class="theme-btn" id="modal-close" type="button">✕</button>
     </div>
     <div class="modal-bd">
-      <h3>已监控宿舍</h3>
-      <div id="target-list" class="target-list"></div>
+      <section id="target-section">
+        <h3>已监控宿舍</h3>
+        <div id="target-list" class="target-list"></div>
+      </section>
 
       <h3>添加宿舍(电费)</h3>
       <div class="picker">
@@ -422,5 +452,3 @@
 <script src="/static/app.js" defer></script>
 </body>
 </html>
-
-

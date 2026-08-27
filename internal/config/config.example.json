@@ -1,8 +1,10 @@
 {
   "username": "填写学号",
-  "port": 8080,
+  "port": 5009,
   "base_url": "https://wxxyshall.usts.edu.cn",
   "targets": [],
   "poll_interval_minutes": 60,
-  "rate_limit_per_minute": 30
+  "rate_limit_per_minute": 30,
+  "admin_auth_enabled": false,
+  "show_homepage": true
 }

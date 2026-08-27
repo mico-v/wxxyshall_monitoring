@@ -5,7 +5,7 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
 ```json
 {
   "username": "学号",
-  "port": 8080,
+  "port": 5009,
   "base_url": "https://wxxyshall.usts.edu.cn",
   "targets": [
     {
@@ -29,7 +29,9 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
     }
   ],
   "poll_interval_minutes": 60,
-  "rate_limit_per_minute": 30
+  "rate_limit_per_minute": 30,
+  "admin_auth_enabled": false,
+  "show_homepage": true
 }
 ```
 
@@ -40,6 +42,8 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
 - `base_url`：学校服务地址，通常无需修改；
 - `poll_interval_minutes`：全局采集间隔，范围 `1..10080` 分钟；
 - `rate_limit_per_minute`：定时和手动电费采集的学校接口请求速率，范围 `1..600`；网页添加宿舍时使用的校区、楼栋、房间发现接口不受此项限制，由进程内缓存和并发合并管理；
+- `admin_auth_enabled`：管理接口是否要求管理密钥，默认 `false`。关闭时仍会生成和保留 `.admin_key`，且主页解锁用的密钥校验接口仍严格验证；
+- `show_homepage`：是否公开显示全部宿舍主页，默认 `true`。设为 `false` 后，单宿舍页不显示返回主页按钮，访问主页必须先输入管理密钥；当它与 `admin_auth_enabled` 同时为 `false` 时，单宿舍页的查询设置只提供添加宿舍，添加后自动跳转到该宿舍；
 - `targets`：监控宿舍列表，数组顺序也是网页和手动批量采集顺序；
 - `show_in_web`：可省略，默认 `true`。设为 `false` 后仍采集和入库，但不出现在公开网页、公开读数接口和 SSE；
 - 宿舍内的 `poll_interval_minutes`：可省略。设置后覆盖该宿舍的全局采集间隔；
@@ -47,4 +51,4 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
 - `campus`、`building`、`room`：必须使用学校接口实际值，三者组合不能重复；
 - `label`：网页显示名称。
 
-配置和 token 支持热重载。宿舍、显示开关、采集间隔和限流修改后约两秒生效；端口变化需要重启。
+配置和 token 支持热重载。宿舍、主页/鉴权开关、显示开关、采集间隔和限流修改后约两秒生效；端口变化需要重启。

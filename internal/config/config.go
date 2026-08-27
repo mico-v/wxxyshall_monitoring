@@ -18,7 +18,7 @@ import (
 
 const (
 	DefaultBaseURL            = "https://wxxyshall.usts.edu.cn"
-	DefaultPort               = 8080
+	DefaultPort               = 5009
 	DefaultPollIntervalMin    = 60
 	DefaultRateLimitPerMinute = 30
 	DefaultFeeItemID          = 409
@@ -70,6 +70,14 @@ type Config struct {
 	Targets            []Target `json:"targets"`
 	PollIntervalMin    int      `json:"poll_interval_minutes"`
 	RateLimitPerMinute int      `json:"rate_limit_per_minute"`
+	AdminAuthEnabled   bool     `json:"admin_auth_enabled"`
+	ShowHomepage       *bool    `json:"show_homepage"`
+}
+
+// IsHomepageShown reports whether the aggregate homepage is publicly visible.
+// The pointer keeps older configuration files compatible: an omitted field defaults to true.
+func (c *Config) IsHomepageShown() bool {
+	return c == nil || c.ShowHomepage == nil || *c.ShowHomepage
 }
 
 // Clone 返回可安全交给调用方修改的深拷贝。
@@ -79,6 +87,10 @@ func (c *Config) Clone() *Config {
 	}
 	cp := *c
 	cp.Targets = append([]Target(nil), c.Targets...)
+	if c.ShowHomepage != nil {
+		value := *c.ShowHomepage
+		cp.ShowHomepage = &value
+	}
 	for i := range cp.Targets {
 		if c.Targets[i].ShowInWeb != nil {
 			value := *c.Targets[i].ShowInWeb
@@ -331,6 +343,10 @@ func normalizeConfig(cfg *Config) {
 	}
 	if cfg.RateLimitPerMinute == 0 {
 		cfg.RateLimitPerMinute = DefaultRateLimitPerMinute
+	}
+	if cfg.ShowHomepage == nil {
+		shown := true
+		cfg.ShowHomepage = &shown
 	}
 	for i := range cfg.Targets {
 		t := &cfg.Targets[i]

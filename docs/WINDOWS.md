@@ -11,7 +11,7 @@
 3. 生成 `config.json` 和 `.admin_key`；
 4. 写入当前用户的注册表开机启动项；
 5. 启动本机 HTTP 服务和系统托盘；
-6. 打开 `http://127.0.0.1:8080/?key=...`。
+6. 打开 `http://127.0.0.1:5009/?key=...`。
 
 不需要管理员权限。Windows 版本默认只监听 `127.0.0.1`，局域网内其他设备不能直接访问。
 
@@ -36,7 +36,7 @@ playwright install chromium
 
 $root = Join-Path $env:LOCALAPPDATA 'WxxyshallMonitoring'
 $key = (Get-Content (Join-Path $root 'data\.admin_key') -Raw).Trim()
-python .\login.py --push "http://127.0.0.1:8080/?key=$key" --push-only
+python .\login.py --push "http://127.0.0.1:5009/?key=$key" --push-only
 ```
 
 登录成功后，token 会直接推送给后台程序。通常只需在 token 到期前重新执行。
