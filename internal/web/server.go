@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mico-v/wxxyshall-monitoring/internal/auth"
@@ -29,22 +30,44 @@ import (
 
 const (
 	maxJSONBody = 1 << 20
+
+	// readingsPerMinuteLimit / readingsBurstLimit: 公开 /api/readings 的每 IP 限流。
+	// 仪表盘的 readings 只在页面加载/钻取时请求（实时更新走 SSE），
+	// 12 次/分钟对正常浏览绰绰有余，同时限制单个攻击 IP 的数据库查询速率。
+	readingsPerMinuteLimit = 30
+	readingsBurstLimit     = 12
+
+	// maxConcurrentReadings: /api/readings 的全局并发上限。
+	// SQLite 连接池只有 3 个连接，突发查询全部涌入会造成羊群效应：大量慢查询
+	// 排队互拖，连带拖慢仪表盘其它请求。限为 4 个并发并快速失败，保证每次查询
+	// 按自然速度完成（正常浏览 1-3 并发永远碰不到 503）。
+	maxConcurrentReadings = 4
+
+	// readingsSemWait: 信号量排队等待时间，超时立即 503（不长期挂起请求）。
+	readingsSemWait = 250 * time.Millisecond
+
+	// healthCacheTTL: /api/health 的数据库探活结果缓存时间，
+	// 避免公开的健康检查接口反复占用共享 SQLite 连接池。
+	healthCacheTTL = 3 * time.Second
 )
 
 var errDiscoveryTokenMissing = errors.New("discovery token missing")
 
 // Server 是 HTTP 服务器的主结构体。
 type Server struct {
-	cfgHub    *config.Hub
-	database  *db.DB
-	collector *collector.Service
-	discovery *discoveryCache
-	hub       *SSEHub
-	jobMgr    *JobManager
-	adminKey  string
-	rootDir   string
-	ctx       context.Context
-	cancel    context.CancelFunc
+	cfgHub          *config.Hub
+	database        *db.DB
+	collector       *collector.Service
+	discovery       *discoveryCache
+	hub             *SSEHub
+	jobMgr          *JobManager
+	adminKey        string
+	rootDir         string
+	ctx             context.Context
+	cancel          context.CancelFunc
+	readingsLimiter *ipLimiter    // 公开 /api/readings 的每 IP 限流
+	readingsSem     chan struct{} // 公开 /api/readings 的全局并发信号量
+	health          healthTTL     // 健康检查结果缓存
 }
 
 // NewServer 创建一个新的 HTTP 服务器。
@@ -63,16 +86,18 @@ func NewServer(hub *config.Hub, dbPath, adminKey, rootDir string) (*Server, erro
 	serverCtx, cancel := context.WithCancel(context.Background())
 
 	s := &Server{
-		cfgHub:    hub,
-		database:  database,
-		collector: collector.New(hub, database),
-		discovery: newDiscoveryCache(maxDiscoveryCacheEntries),
-		hub:       sseHub,
-		jobMgr:    NewJobManager(),
-		adminKey:  adminKey,
-		rootDir:   rootDir,
-		ctx:       serverCtx,
-		cancel:    cancel,
+		cfgHub:          hub,
+		database:        database,
+		collector:       collector.New(hub, database),
+		discovery:       newDiscoveryCache(maxDiscoveryCacheEntries),
+		hub:             sseHub,
+		jobMgr:          NewJobManager(),
+		adminKey:        adminKey,
+		rootDir:         rootDir,
+		ctx:             serverCtx,
+		cancel:          cancel,
+		readingsLimiter: newIPLimiter(readingsPerMinuteLimit, readingsBurstLimit),
+		readingsSem:     make(chan struct{}, maxConcurrentReadings),
 	}
 	s.collector.SetReadingHandler(func(event collector.ReadingEvent) {
 		if event.Target.IsShownInWeb() {
@@ -94,7 +119,7 @@ func (s *Server) Handler() http.Handler {
 	// API 路由
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/events", s.handleSSE)
-	mux.HandleFunc("GET /api/readings", s.handleReadings)
+	mux.HandleFunc("GET /api/readings", s.limitReadings(s.handleReadings))
 	mux.HandleFunc("GET /api/config", s.handleGetConfig)
 	mux.HandleFunc("POST /api/config", s.requireAdmin(s.handleSaveConfig))
 	mux.HandleFunc("POST /api/collect", s.requireAdmin(s.handleCollect))
@@ -146,7 +171,7 @@ func (s *Server) handleRoom(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !monitored {
-		s.serveHTML(w, "404.html")
+		s.serve404(w)
 		return
 	}
 	s.serveHTML(w, "webapp.html")
@@ -155,11 +180,48 @@ func (s *Server) handleRoom(w http.ResponseWriter, r *http.Request) {
 // ---- API 处理器 ----
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if err := s.database.Ping(r.Context()); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "database": false})
+	now := time.Now()
+	if healthy, fresh := s.health.get(now); fresh {
+		s.writeHealth(w, healthy)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "database": true})
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	healthy := s.database.Ping(ctx) == nil
+	s.health.set(now, healthy)
+	s.writeHealth(w, healthy)
+}
+
+func (s *Server) writeHealth(w http.ResponseWriter, healthy bool) {
+	if healthy {
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true, "database": true})
+		return
+	}
+	writeJSON(w, http.StatusServiceUnavailable, map[string]bool{"ok": false, "database": false})
+}
+
+// healthTTL 缓存最近一次数据库探活结果，防止公开的 /api/health 被频繁调用时
+// 与读数查询/采集写入争抢共享的 SQLite 连接。
+type healthTTL struct {
+	mu      sync.Mutex
+	updated time.Time
+	healthy bool
+}
+
+func (h *healthTTL) get(now time.Time) (healthy, fresh bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if now.Sub(h.updated) < healthCacheTTL {
+		return h.healthy, true
+	}
+	return false, false
+}
+
+func (h *healthTTL) set(now time.Time, healthy bool) {
+	h.mu.Lock()
+	h.updated = now
+	h.healthy = healthy
+	h.mu.Unlock()
 }
 
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
@@ -173,13 +235,20 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-	id, ch, ok := s.hub.Subscribe()
-	if !ok {
+	ip := clientIP(r)
+	id, ch, status := s.hub.Subscribe(ip)
+	if status != subscribeOK {
+		if status == subscribeIPLimited {
+			// 单 IP 并发超限：明确 429 并要求稍后重连。
+			w.Header().Set("Retry-After", "10")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "当前 IP 的实时连接过多，请稍后重试"})
+			return
+		}
 		w.Header().Set("Retry-After", "30")
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "SSE 连接数已达上限或服务正在关闭"})
 		return
 	}
-	defer s.hub.Unsubscribe(id)
+	defer s.hub.Unsubscribe(id, ip)
 	controller := http.NewResponseController(w)
 	writeEvent := func(data []byte) bool {
 		_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
@@ -811,7 +880,22 @@ func (s *Server) handle404(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
-	s.serveHTML(w, "404.html")
+	s.serve404(w)
+}
+
+// serve404 以 404 状态码输出 404 页面。
+// 之前未知路径以 200 返回错误页，会让爬虫/缓存/扫描器把错误页当有效内容收录。
+func (s *Server) serve404(w http.ResponseWriter) {
+	data, err := readEmbeddedFile("404.html")
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusNotFound)
+	w.Write(data)
 }
 
 // ---- 中间件/辅助 ----
@@ -824,6 +908,30 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		next(w, r)
+	}
+}
+
+// limitReadings 保护公开 /api/readings：
+// 1) 每 IP 令牌桶限流，限制单个来源的持续滥用速率；
+// 2) 全局重查询信号量快速失败，防止突发查询堆满共享 SQLite 连接池造成羊群效应。
+// 正常仪表盘使用（1-3 个并发）永远不会触发 503；超限返回 429/503 与 Retry-After。
+func (s *Server) limitReadings(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.readingsLimiter != nil && !s.readingsLimiter.Allow(clientIP(r)) {
+			w.Header().Set("Retry-After", "5")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "请求过于频繁，请稍后再试"})
+			return
+		}
+		select {
+		case s.readingsSem <- struct{}{}:
+			defer func() { <-s.readingsSem }()
+			next(w, r)
+		case <-time.After(readingsSemWait):
+			// 信号量满：立即失败而不是排队，避免慢查询堆积拖垮整个连接池。
+			w.Header().Set("Retry-After", "2")
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "服务器繁忙，请稍后重试"})
+		case <-r.Context().Done():
+		}
 	}
 }
 
@@ -1074,8 +1182,10 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
-		if r.TLS != nil {
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+		// 直接 TLS 或经 Caddy 等反代终止 TLS（X-Forwarded-Proto: https，反代会覆写该头）时
+		// 启用 HSTS。纯 HTTP 响应中浏览器会忽略该头，不会误伤直连的明文部署。
+		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 		}
 		next.ServeHTTP(w, r)

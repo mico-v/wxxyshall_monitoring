@@ -9,7 +9,20 @@ import (
 	"time"
 )
 
-const maxSSEClients = 128
+const (
+	maxSSEClients = 128 // 全局并发上限，防止单个进程被连接数耗尽
+	maxSSEPerIP   = 8   // 单 IP 并发上限，防止单机占用全部槽位
+)
+
+// subscribeResult 表示 Subscribe 的结果。
+type subscribeResult int
+
+const (
+	subscribeOK        subscribeResult = iota // 注册成功
+	subscribeClosed                           // Hub 已关闭
+	subscribeFull                             // 全局并发已达上限
+	subscribeIPLimited                        // 当前 IP 并发已达上限
+)
 
 // SSEEvent 代表一个 SSE 事件。
 type SSEEvent struct {
@@ -19,22 +32,24 @@ type SSEEvent struct {
 
 // SSEHub 管理 SSE 客户端连接。
 type SSEHub struct {
-	mu      sync.RWMutex
-	clients map[string]chan SSEEvent
-	nextID  int
-	closed  bool
+	mu       sync.RWMutex
+	clients  map[string]chan SSEEvent
+	ipCounts map[string]int
+	nextID   int
+	closed   bool
 }
 
 // NewSSEHub 创建一个新的 SSE Hub。
 func NewSSEHub() *SSEHub {
 	return &SSEHub{
-		clients: make(map[string]chan SSEEvent),
+		clients:  make(map[string]chan SSEEvent),
+		ipCounts: make(map[string]int),
 	}
 }
 
-// Subscribe 注册一个新的 SSE 客户端。
-// 返回客户端 ID 和接收事件的 channel。
-func (h *SSEHub) Subscribe() (string, <-chan SSEEvent, bool) {
+// Subscribe 注册一个新的 SSE 客户端，并计入该 IP 的并发数。
+// 返回客户端 ID、接收事件的 channel 与注册结果。
+func (h *SSEHub) Subscribe(ip string) (string, <-chan SSEEvent, subscribeResult) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -43,25 +58,34 @@ func (h *SSEHub) Subscribe() (string, <-chan SSEEvent, bool) {
 	ch := make(chan SSEEvent, 16)
 	if h.closed {
 		close(ch)
-		return id, ch, false
+		return id, ch, subscribeClosed
 	}
 	if len(h.clients) >= maxSSEClients {
 		close(ch)
-		return id, ch, false
+		return id, ch, subscribeFull
+	}
+	if h.ipCounts[ip] >= maxSSEPerIP {
+		close(ch)
+		return id, ch, subscribeIPLimited
 	}
 	h.clients[id] = ch
-	return id, ch, true
+	h.ipCounts[ip]++
+	return id, ch, subscribeOK
 }
 
-// Unsubscribe 注销一个 SSE 客户端。
+// Unsubscribe 注销一个 SSE 客户端并释放该 IP 的并发额度。
 // 安全地处理 channel 已被 Close() 关闭的情况。
-func (h *SSEHub) Unsubscribe(id string) {
+func (h *SSEHub) Unsubscribe(id, ip string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if ch, ok := h.clients[id]; ok {
 		close(ch)
 		delete(h.clients, id)
+		h.ipCounts[ip]--
+		if h.ipCounts[ip] <= 0 {
+			delete(h.ipCounts, ip)
+		}
 	}
 }
 
@@ -93,6 +117,7 @@ func (h *SSEHub) Close() {
 		close(ch)
 		delete(h.clients, id)
 	}
+	h.ipCounts = make(map[string]int)
 }
 
 // MarshalEvent 将 SSE 事件序列化为文本格式。

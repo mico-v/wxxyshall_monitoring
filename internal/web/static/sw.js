@@ -1,5 +1,5 @@
 const CACHE_PREFIX = 'elec-monitor-';
-const CACHE_NAME = `${CACHE_PREFIX}v8`;
+const CACHE_NAME = `${CACHE_PREFIX}v9`;
 const APP_SHELL = [
   '/',
   '/offline.html',
@@ -7,6 +7,8 @@ const APP_SHELL = [
   '/manifest.json',
   '/favicon.ico',
   '/static/echarts.min.js',
+  '/static/app.js',
+  '/static/theme.js',
   '/static/icon-192.png',
   '/static/icon-512.png',
 ];
