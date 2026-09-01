@@ -16,6 +16,7 @@
 - 仪表盘按 `config.json` 中的目标顺序显示和采集。网页“查询设置”只提供级联添加宿舍；其他字段、排序和已有宿舍调整统一手工编辑 `config.json`。
 - PWA 可安装，离线时使用最近缓存的公开配置和读数；管理请求和带鉴权请求绝不缓存。
 - 可通过 `admin_auth_enabled` 控制修改、采集、发现、任务状态/取消和 token 推送接口是否需要管理密钥。
+- 支持配置 webhook 通知；默认在监控宿舍余额首次进入低值区间时发送一次，余额恢复后重新触发。
 
 项目没有自动更新功能。升级由管理员替换二进制并重启服务完成。
 
@@ -158,13 +159,35 @@ elec config       # 显示密钥文件位置，不直接打印密钥
       "room": "房间接口值",
       "label": "宿舍显示名称",
       "show_in_web": true,
-      "poll_interval_minutes": 30
+      "poll_interval_minutes": 30,
+      "notify_mode": "alert",
+      "notify_time": "08:00",
+      "webhook": {
+        "enabled": true,
+        "url": "https://example.com/room-webhook",
+        "token": "该宿舍专用 TOKEN",
+        "body": {
+          "content": "{{label}} 当前余额：{{surplus_charge}}",
+          "room_id": "{{room}}"
+        }
+      }
     }
   ],
   "poll_interval_minutes": 60,
   "rate_limit_per_minute": 30,
   "admin_auth_enabled": false,
-  "show_homepage": true
+  "show_homepage": true,
+  "webhook": {
+    "enabled": false,
+    "url": "http://10.57.33.51:9966/send",
+    "token": "",
+    "notify_mode": "low_balance",
+    "low_balance_threshold": 10,
+    "body": {
+      "content": "【电费监控】{{label}} 当前余额：{{surplus_charge}}，采集时间：{{ts}}",
+      "umo": "爱丽丝:FriendMessage:2265044253"
+    }
+  }
 }
 ```
 
@@ -180,6 +203,12 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 - 目标的 `show_in_web` 可省略，默认 `true`；设为 `false` 后仍会定时/手动采集，但不会出现在公开配置、读数、宿舍页面或 SSE 中。
 - 目标的 `poll_interval_minutes` 可省略；省略时继承全局 `poll_interval_minutes`，设置后以该宿舍的 `1..10080` 分钟周期覆盖全局值。
 - `targets` 数组顺序就是仪表盘和批量采集顺序。
+- 目标的 `notify_mode` 支持 `none`（不通知）、`daily`（每天在 `notify_time` 到达后的首次成功采集时通知一次）和 `alert`（仅余额首次降至低值阈值时通知）；省略时保持旧行为，按全局 webhook 的 `notify_mode` 判断。
+- 目标的 `notify_time` 使用 `HH:MM` 格式，仅 `daily` 模式使用；省略时默认为 `08:00`。每日通知按宿舍分别去重，发送失败不会记为已发送，下一次成功采集会重试。
+- 目标的 `webhook` 可选；省略时使用全局 webhook，配置后将完整覆盖该宿舍的全局 webhook（包括 `enabled`、`url`、`token`、阈值和 `body`）。设置 `webhook.enabled=false` 可单独关闭该宿舍通知。
+- `webhook.enabled` 开启后，每次成功采集都会按照对应宿舍的 `notify_mode` 判断是否异步发送 POST JSON；请求头为 `Authorization: Bearer <token>`，请求体原样来自 `webhook.body`（仅递归替换字符串模板），可以包含任意 JSON 字段。例如 `content`、`umo` 只是兼容目标服务的配置示例，并非程序内置字段。
+- `webhook.notify_mode` 支持 `low_balance`（默认，首次降至阈值时通知）、`balance_decrease`（余额较上一条降低时通知）和 `every_collection`（每次成功采集通知）。该字段主要用于兼容未设置宿舍 `notify_mode` 的旧配置；新配置使用宿舍的 `none`/`daily`/`alert`。`low_balance_threshold` 默认 `10`。
+- `webhook.body` 必须是 JSON 对象，支持嵌套对象和数组；其中字符串可使用 `{{label}}`、`{{campus}}`、`{{building}}`、`{{room}}`、`{{ts}}`、`{{surplus_charge}}`、`{{low_balance_threshold}}` 和 `{{total_usage}}` 占位符。旧版顶层 `umo` / `content_template` 配置会自动迁移到 `body`。
 
 网页“查询设置”仅显示已有宿舍，并允许通过校区→楼栋→房间级联添加宿舍；添加后自动保存。网页不编辑服务字段、目标字段和顺序，也不提供删除操作。需要修改、排序或删除时由管理员直接编辑 `config.json`，保存后会热重载。systemd 安装环境中请保持文件归属 `elec:elec`、权限 `0640`，数据目录不允许符号链接或特殊文件。
 
@@ -191,6 +220,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 - JSON 请求限制为 1 MiB、拒绝未知字段和多余 JSON；配置、token 使用临时文件 + `fsync` + 原子替换保存。
 - 默认安装服务不以 root 运行，数据目录及敏感文件采用受限权限。
 - 历史记录没有删除 API 或自动清理任务；请自行备份整个数据目录。
+- webhook 的 `token` 也属于敏感信息；启用后修改配置即可热重载，消息发送成功和失败都会记录日志，但不会影响电费采集入库。
 
 ## API
 

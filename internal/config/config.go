@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,18 +24,39 @@ const (
 	DefaultRateLimitPerMinute = 30
 	DefaultFeeItemID          = 409
 	DefaultAppID              = 34
+	DefaultWebhookMode        = "low_balance"
+	DefaultWebhookThreshold   = 10.0
+	DefaultWebhookTemplate    = "【电费监控】{{label}} 当前余额：{{surplus_charge}}，采集时间：{{ts}}"
+	DefaultTargetNotifyTime   = "08:00"
 )
 
 // Target 代表一个监控宿舍目标。
 type Target struct {
-	FeeItemID       int    `json:"feeitemid"`
-	AppID           int    `json:"appId"`
-	Campus          string `json:"campus"`
-	Building        string `json:"building"`
-	Room            string `json:"room"`
-	Label           string `json:"label"`
-	ShowInWeb       *bool  `json:"show_in_web,omitempty"`
-	PollIntervalMin *int   `json:"poll_interval_minutes,omitempty"`
+	FeeItemID       int            `json:"feeitemid"`
+	AppID           int            `json:"appId"`
+	Campus          string         `json:"campus"`
+	Building        string         `json:"building"`
+	Room            string         `json:"room"`
+	Label           string         `json:"label"`
+	ShowInWeb       *bool          `json:"show_in_web,omitempty"`
+	PollIntervalMin *int           `json:"poll_interval_minutes,omitempty"`
+	NotifyMode      string         `json:"notify_mode,omitempty"`
+	NotifyTime      string         `json:"notify_time,omitempty"`
+	Webhook         *WebhookConfig `json:"webhook,omitempty"`
+}
+
+// WebhookConfig 是采集成功通知的配置。
+type WebhookConfig struct {
+	Enabled             bool           `json:"enabled"`
+	URL                 string         `json:"url"`
+	Token               string         `json:"token,omitempty"`
+	NotifyMode          string         `json:"notify_mode"`
+	LowBalanceThreshold float64        `json:"low_balance_threshold"`
+	Body                map[string]any `json:"body"`
+
+	// Deprecated compatibility fields. They are migrated into Body on load.
+	UMO             string `json:"umo,omitempty"`
+	ContentTemplate string `json:"content_template,omitempty"`
 }
 
 // IsShownInWeb reports whether this target is included in public web views.
@@ -62,16 +84,29 @@ func (t Target) DisplayLabel() string {
 	return t.Key()
 }
 
+// EffectiveWebhook returns this target's webhook override, or the global
+// webhook configuration when no target override is present.
+func (t Target) EffectiveWebhook(global WebhookConfig) WebhookConfig {
+	if t.Webhook == nil {
+		global.Body = cloneJSONMap(global.Body)
+		return global
+	}
+	webhook := *t.Webhook
+	webhook.Body = cloneJSONMap(webhook.Body)
+	return webhook
+}
+
 // Config 是 config.json 的完整映射。
 type Config struct {
-	Username           string   `json:"username"`
-	Port               int      `json:"port"`
-	BaseURL            string   `json:"base_url"`
-	Targets            []Target `json:"targets"`
-	PollIntervalMin    int      `json:"poll_interval_minutes"`
-	RateLimitPerMinute int      `json:"rate_limit_per_minute"`
-	AdminAuthEnabled   bool     `json:"admin_auth_enabled"`
-	ShowHomepage       *bool    `json:"show_homepage"`
+	Username           string        `json:"username"`
+	Port               int           `json:"port"`
+	BaseURL            string        `json:"base_url"`
+	Targets            []Target      `json:"targets"`
+	PollIntervalMin    int           `json:"poll_interval_minutes"`
+	RateLimitPerMinute int           `json:"rate_limit_per_minute"`
+	AdminAuthEnabled   bool          `json:"admin_auth_enabled"`
+	ShowHomepage       *bool         `json:"show_homepage"`
+	Webhook            WebhookConfig `json:"webhook"`
 }
 
 // IsHomepageShown reports whether the aggregate homepage is publicly visible.
@@ -91,6 +126,7 @@ func (c *Config) Clone() *Config {
 		value := *c.ShowHomepage
 		cp.ShowHomepage = &value
 	}
+	cp.Webhook.Body = cloneJSONMap(c.Webhook.Body)
 	for i := range cp.Targets {
 		if c.Targets[i].ShowInWeb != nil {
 			value := *c.Targets[i].ShowInWeb
@@ -99,6 +135,11 @@ func (c *Config) Clone() *Config {
 		if c.Targets[i].PollIntervalMin != nil {
 			value := *c.Targets[i].PollIntervalMin
 			cp.Targets[i].PollIntervalMin = &value
+		}
+		if c.Targets[i].Webhook != nil {
+			webhook := *c.Targets[i].Webhook
+			webhook.Body = cloneJSONMap(c.Targets[i].Webhook.Body)
+			cp.Targets[i].Webhook = &webhook
 		}
 	}
 	return &cp
@@ -304,6 +345,9 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.RateLimitPerMinute < 1 || cfg.RateLimitPerMinute > 600 {
 		return fmt.Errorf("rate_limit_per_minute 必须在 1..600 之间")
 	}
+	if err := validateWebhook(cfg.Webhook); err != nil {
+		return err
+	}
 	if len(cfg.Targets) > 1000 {
 		return fmt.Errorf("targets 最多允许 1000 项")
 	}
@@ -320,6 +364,22 @@ func ValidateConfig(cfg *Config) error {
 		}
 		if target.PollIntervalMin != nil && (*target.PollIntervalMin < 1 || *target.PollIntervalMin > 7*24*60) {
 			return fmt.Errorf("targets[%d] 的 poll_interval_minutes 必须在 1..10080 之间", i)
+		}
+		if target.NotifyMode != "" && target.NotifyMode != "none" && target.NotifyMode != "daily" && target.NotifyMode != "alert" {
+			return fmt.Errorf("targets[%d] 的 notify_mode 必须是 none、daily 或 alert", i)
+		}
+		if target.NotifyTime != "" {
+			if len(target.NotifyTime) != len("15:04") {
+				return fmt.Errorf("targets[%d] 的 notify_time 必须是 HH:MM 格式", i)
+			}
+			if _, err := time.Parse("15:04", target.NotifyTime); err != nil {
+				return fmt.Errorf("targets[%d] 的 notify_time 必须是 HH:MM 格式", i)
+			}
+		}
+		if target.Webhook != nil {
+			if err := validateWebhook(*target.Webhook); err != nil {
+				return fmt.Errorf("targets[%d].webhook 无效: %w", i, err)
+			}
 		}
 		if _, ok := seen[target.Key()]; ok {
 			return fmt.Errorf("targets[%d] 与前面的宿舍重复: %s", i, target.Key())
@@ -348,6 +408,7 @@ func normalizeConfig(cfg *Config) {
 		shown := true
 		cfg.ShowHomepage = &shown
 	}
+	normalizeWebhook(&cfg.Webhook)
 	for i := range cfg.Targets {
 		t := &cfg.Targets[i]
 		if t.FeeItemID == 0 {
@@ -360,9 +421,111 @@ func normalizeConfig(cfg *Config) {
 		t.Building = strings.TrimSpace(t.Building)
 		t.Room = strings.TrimSpace(t.Room)
 		t.Label = strings.TrimSpace(t.Label)
+		t.NotifyMode = strings.TrimSpace(t.NotifyMode)
+		t.NotifyTime = strings.TrimSpace(t.NotifyTime)
+		if t.NotifyMode == "daily" && t.NotifyTime == "" {
+			t.NotifyTime = DefaultTargetNotifyTime
+		}
+		if t.Webhook != nil {
+			normalizeWebhook(t.Webhook)
+		}
 		if t.Label == "" {
 			t.Label = t.Campus + "/" + t.Building + "/" + t.Room
 		}
+	}
+}
+
+func normalizeWebhook(webhook *WebhookConfig) {
+	if webhook == nil {
+		return
+	}
+	webhook.URL = strings.TrimSpace(webhook.URL)
+	webhook.Token = strings.TrimSpace(webhook.Token)
+	webhook.UMO = strings.TrimSpace(webhook.UMO)
+	webhook.ContentTemplate = strings.TrimSpace(webhook.ContentTemplate)
+	if webhook.Body == nil && (webhook.UMO != "" || webhook.ContentTemplate != "") {
+		content := webhook.ContentTemplate
+		if content == "" {
+			content = DefaultWebhookTemplate
+		}
+		webhook.Body = map[string]any{"content": content, "umo": webhook.UMO}
+	}
+	if webhook.Body != nil {
+		// The old fields are only migration inputs; new configurations use Body.
+		webhook.UMO = ""
+		webhook.ContentTemplate = ""
+	}
+	if webhook.NotifyMode == "" {
+		webhook.NotifyMode = DefaultWebhookMode
+	}
+	if webhook.LowBalanceThreshold == 0 {
+		webhook.LowBalanceThreshold = DefaultWebhookThreshold
+	}
+}
+
+func validateWebhook(webhook WebhookConfig) error {
+	if len(webhook.URL) > 2048 || len(webhook.Token) > 64<<10 || len(webhook.UMO) > 512 || len(webhook.NotifyMode) > 32 || len(webhook.ContentTemplate) > 64<<10 {
+		return fmt.Errorf("webhook 字段过长")
+	}
+	if webhook.Body != nil {
+		body, err := json.Marshal(webhook.Body)
+		if err != nil {
+			return fmt.Errorf("webhook.body 必须是有效 JSON 对象: %w", err)
+		}
+		if len(body) > 1<<20 {
+			return fmt.Errorf("webhook.body 不能超过 1 MiB")
+		}
+	}
+	if webhook.NotifyMode != "" && webhook.NotifyMode != "low_balance" && webhook.NotifyMode != "every_collection" && webhook.NotifyMode != "balance_decrease" {
+		return fmt.Errorf("webhook.notify_mode 必须是 low_balance、balance_decrease 或 every_collection")
+	}
+	if math.IsNaN(webhook.LowBalanceThreshold) || math.IsInf(webhook.LowBalanceThreshold, 0) || webhook.LowBalanceThreshold < 0 {
+		return fmt.Errorf("webhook.low_balance_threshold 必须是非负有限数")
+	}
+	if webhook.URL != "" {
+		u, err := url.Parse(webhook.URL)
+		if err != nil || u.Host == "" || u.User != nil || u.Fragment != "" ||
+			(u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("webhook.url 必须是有效的 http/https 地址")
+		}
+	}
+	if webhook.Enabled {
+		if webhook.URL == "" {
+			return fmt.Errorf("webhook.enabled=true 时 webhook.url 不能为空")
+		}
+		if webhook.Token == "" {
+			return fmt.Errorf("webhook.enabled=true 时 webhook.token 不能为空")
+		}
+		if webhook.Body == nil {
+			return fmt.Errorf("webhook.enabled=true 时 webhook.body 不能为空")
+		}
+	}
+	return nil
+}
+
+func cloneJSONMap(input map[string]any) map[string]any {
+	if input == nil {
+		return nil
+	}
+	output := make(map[string]any, len(input))
+	for key, value := range input {
+		output[key] = cloneJSONValue(value)
+	}
+	return output
+}
+
+func cloneJSONValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		return cloneJSONMap(value)
+	case []any:
+		output := make([]any, len(value))
+		for i, item := range value {
+			output[i] = cloneJSONValue(item)
+		}
+		return output
+	default:
+		return value
 	}
 }
 

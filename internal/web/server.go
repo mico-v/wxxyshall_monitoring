@@ -71,6 +71,16 @@ type Server struct {
 	health          healthTTL     // 健康检查结果缓存
 }
 
+type webhookConfigPatch struct {
+	Enabled             *bool           `json:"enabled"`
+	URL                 *string         `json:"url"`
+	Token               *string         `json:"token"`
+	TokenConfigured     *bool           `json:"token_configured"` // response-only marker; ignored on update
+	NotifyMode          *string         `json:"notify_mode"`
+	LowBalanceThreshold *float64        `json:"low_balance_threshold"`
+	Body                *map[string]any `json:"body"`
+}
+
 // NewServer 创建一个新的 HTTP 服务器。
 func NewServer(hub *config.Hub, dbPath, adminKey, rootDir string) (*Server, error) {
 	database, err := db.Open(dbPath)
@@ -431,14 +441,14 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	managementView := keyAuthorized || (!cfg.AdminAuthEnabled && r.URL.Query().Get("admin") == "1")
-	publicTargets := cfg.GetWebTargets()
+	publicTargets := apiTargets(cfg.GetWebTargets(), false)
 	if !cfg.IsHomepageShown() && !managementView {
 		publicTargets = nil
 		campus, building, room := r.URL.Query().Get("campus"), r.URL.Query().Get("building"), r.URL.Query().Get("room")
 		if campus != "" && building != "" && room != "" {
 			for _, target := range cfg.GetWebTargets() {
 				if target.Campus == campus && target.Building == building && target.Room == room {
-					publicTargets = []config.Target{target}
+					publicTargets = apiTargets([]config.Target{target}, false)
 					break
 				}
 			}
@@ -451,7 +461,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		"show_homepage":       cfg.IsHomepageShown(),
 	}
 	if managementView {
-		out["targets"] = cfg.GetTargets()
+		out["targets"] = apiTargets(cfg.GetTargets(), true)
 		out["username"] = cfg.Username
 		out["port"] = cfg.Port
 		out["base_url"] = cfg.BaseURL
@@ -459,6 +469,14 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		out["rate_limit_per_minute"] = cfg.RateLimitPerMinute
 		out["admin_auth_enabled"] = cfg.AdminAuthEnabled
 		out["show_homepage"] = cfg.IsHomepageShown()
+		out["webhook"] = map[string]any{
+			"enabled":               cfg.Webhook.Enabled,
+			"url":                   cfg.Webhook.URL,
+			"token_configured":      cfg.Webhook.Token != "",
+			"notify_mode":           cfg.Webhook.NotifyMode,
+			"low_balance_threshold": cfg.Webhook.LowBalanceThreshold,
+			"body":                  cfg.Webhook.Body,
+		}
 		out["port_change_requires_restart"] = true
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -466,15 +484,16 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Username           *string          `json:"username"`
-		Port               *int             `json:"port"`
-		BaseURL            *string          `json:"base_url"`
-		Targets            *[]config.Target `json:"targets"`
-		Target             *config.Target   `json:"target"`
-		PollIntervalMin    *int             `json:"poll_interval_minutes"`
-		RateLimitPerMinute *int             `json:"rate_limit_per_minute"`
-		AdminAuthEnabled   *bool            `json:"admin_auth_enabled"`
-		ShowHomepage       *bool            `json:"show_homepage"`
+		Username           *string             `json:"username"`
+		Port               *int                `json:"port"`
+		BaseURL            *string             `json:"base_url"`
+		Targets            *[]config.Target    `json:"targets"`
+		Target             *config.Target      `json:"target"`
+		PollIntervalMin    *int                `json:"poll_interval_minutes"`
+		RateLimitPerMinute *int                `json:"rate_limit_per_minute"`
+		AdminAuthEnabled   *bool               `json:"admin_auth_enabled"`
+		ShowHomepage       *bool               `json:"show_homepage"`
+		Webhook            *webhookConfigPatch `json:"webhook"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeJSON(w, jsonDecodeStatus(err), map[string]string{"error": "JSON 解析失败: " + err.Error()})
@@ -509,7 +528,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	if body.Target != nil {
 		if body.Username != nil || body.Port != nil || body.BaseURL != nil || body.Targets != nil ||
 			body.PollIntervalMin != nil || body.RateLimitPerMinute != nil ||
-			body.AdminAuthEnabled != nil || body.ShowHomepage != nil {
+			body.AdminAuthEnabled != nil || body.ShowHomepage != nil || body.Webhook != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target 不能与其他配置字段同时提交"})
 			return
 		}
@@ -552,6 +571,19 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 					if target.PollIntervalMin != nil {
 						cfg.Targets[i].PollIntervalMin = target.PollIntervalMin
 					}
+					if target.NotifyMode != "" {
+						cfg.Targets[i].NotifyMode = target.NotifyMode
+					}
+					if target.NotifyTime != "" {
+						cfg.Targets[i].NotifyTime = target.NotifyTime
+					}
+					if target.Webhook != nil {
+						webhook := *target.Webhook
+						if webhook.Token == "" && old.Webhook != nil {
+							webhook.Token = old.Webhook.Token
+						}
+						cfg.Targets[i].Webhook = &webhook
+					}
 					return nil
 				}
 			}
@@ -568,7 +600,21 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 			cfg.BaseURL = *body.BaseURL
 		}
 		if body.Targets != nil {
-			cfg.Targets = append([]config.Target(nil), (*body.Targets)...)
+			updatedTargets := append([]config.Target(nil), (*body.Targets)...)
+			for i := range updatedTargets {
+				if updatedTargets[i].Webhook == nil || updatedTargets[i].Webhook.Token != "" {
+					continue
+				}
+				for _, old := range cfg.Targets {
+					if old.Key() == updatedTargets[i].Key() && old.Webhook != nil {
+						webhook := *updatedTargets[i].Webhook
+						webhook.Token = old.Webhook.Token
+						updatedTargets[i].Webhook = &webhook
+						break
+					}
+				}
+			}
+			cfg.Targets = updatedTargets
 		}
 		if body.PollIntervalMin != nil {
 			cfg.PollIntervalMin = *body.PollIntervalMin
@@ -583,6 +629,28 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 			value := *body.ShowHomepage
 			cfg.ShowHomepage = &value
 		}
+		if body.Webhook != nil {
+			webhookCfg := cfg.Webhook
+			if body.Webhook.Enabled != nil {
+				webhookCfg.Enabled = *body.Webhook.Enabled
+			}
+			if body.Webhook.URL != nil {
+				webhookCfg.URL = *body.Webhook.URL
+			}
+			if body.Webhook.Token != nil {
+				webhookCfg.Token = *body.Webhook.Token
+			}
+			if body.Webhook.NotifyMode != nil {
+				webhookCfg.NotifyMode = *body.Webhook.NotifyMode
+			}
+			if body.Webhook.LowBalanceThreshold != nil {
+				webhookCfg.LowBalanceThreshold = *body.Webhook.LowBalanceThreshold
+			}
+			if body.Webhook.Body != nil {
+				webhookCfg.Body = *body.Webhook.Body
+			}
+			cfg.Webhook = webhookCfg
+		}
 		return nil
 	})
 	if err != nil {
@@ -592,13 +660,44 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	s.collector.SetRate(cfg.RateLimitPerMinute)
 	restartRequired := cfg.Port != oldPort
 	slog.Info("配置已更新", "targets", len(cfg.Targets), "interval_minutes", cfg.PollIntervalMin, "rate_limit", cfg.RateLimitPerMinute, "restart_required", restartRequired)
+	responseCfg := redactConfigForAPI(cfg)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "config": cfg, "targets": cfg.GetTargets(),
+		"ok": true, "config": responseCfg, "targets": apiTargets(cfg.GetTargets(), true),
 		"restart_required": restartRequired,
 	})
 	if restartRequired {
 		slog.Warn("端口配置已保存，需重启服务后生效", "old_port", oldPort, "new_port", cfg.Port)
 	}
+}
+
+func apiTargets(targets []config.Target, includeWebhook bool) []config.Target {
+	if len(targets) == 0 {
+		return nil
+	}
+	result := append([]config.Target(nil), targets...)
+	for i := range result {
+		if result[i].Webhook == nil {
+			continue
+		}
+		if !includeWebhook {
+			result[i].Webhook = nil
+			continue
+		}
+		webhook := *result[i].Webhook
+		webhook.Token = ""
+		result[i].Webhook = &webhook
+	}
+	return result
+}
+
+func redactConfigForAPI(cfg *config.Config) *config.Config {
+	result := cfg.Clone()
+	if result == nil {
+		return nil
+	}
+	result.Webhook.Token = ""
+	result.Targets = apiTargets(result.Targets, true)
+	return result
 }
 
 func (s *Server) handleCollect(w http.ResponseWriter, r *http.Request) {
@@ -1058,10 +1157,11 @@ func (s *Server) Close() error {
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer waitCancel()
 	waitErr := errors.Join(s.jobMgr.Wait(waitCtx), s.collector.WaitIdle(waitCtx))
+	notifyErr := s.collector.Close(waitCtx)
 	if waitErr != nil {
-		return waitErr
+		return errors.Join(waitErr, notifyErr)
 	}
-	return s.database.Close()
+	return errors.Join(notifyErr, s.database.Close())
 }
 
 func (s *Server) Collector() *collector.Service { return s.collector }

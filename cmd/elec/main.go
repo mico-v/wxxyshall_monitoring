@@ -627,11 +627,19 @@ func runCollectCommand() error {
 		return fmt.Errorf("打开数据库失败: %w", err)
 	}
 	defer database.Close()
+	service := collector.New(hub, database)
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := service.Close(closeCtx); err != nil {
+			slog.Warn("等待 webhook 通知完成失败", "err", err)
+		}
+	}()
 	targets := hub.Config().GetTargets()
 	if len(targets) == 0 {
 		return fmt.Errorf("没有配置监控宿舍")
 	}
-	results, err := collector.New(hub, database).CollectAll(context.Background(), targets, nil)
+	results, err := service.CollectAll(context.Background(), targets, nil)
 	if err != nil {
 		return err
 	}

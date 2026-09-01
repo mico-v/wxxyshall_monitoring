@@ -13,14 +13,16 @@ import (
 	"github.com/mico-v/wxxyshall-monitoring/internal/config"
 	"github.com/mico-v/wxxyshall-monitoring/internal/db"
 	"github.com/mico-v/wxxyshall-monitoring/internal/rate"
+	"github.com/mico-v/wxxyshall-monitoring/internal/webhook"
 )
 
 var ErrBusy = errors.New("已有采集任务正在运行")
 
 type ReadingEvent struct {
-	TS      time.Time
-	Target  config.Target
-	Reading *charge.Reading
+	TS                    time.Time
+	Target                config.Target
+	Reading               *charge.Reading
+	PreviousSurplusCharge *float64
 }
 
 type Result struct {
@@ -47,8 +49,9 @@ type Service struct {
 	database  *db.DB
 	limiter   *rate.Limiter
 	run       chan struct{}
+	notifier  *webhook.Notifier
 	handlerMu sync.RWMutex
-	onReading func(ReadingEvent)
+	handlers  []func(ReadingEvent)
 }
 
 func New(hub *config.Hub, database *db.DB) *Service {
@@ -56,12 +59,14 @@ func New(hub *config.Hub, database *db.DB) *Service {
 	if cfg := hub.Config(); cfg != nil {
 		ratePerMinute = cfg.RateLimitPerMinute
 	}
-	return &Service{
+	service := &Service{
 		hub:      hub,
 		database: database,
 		limiter:  rate.NewLimiter(ratePerMinute),
 		run:      make(chan struct{}, 1),
 	}
+	service.notifier = webhook.New(hub)
+	return service
 }
 
 func (s *Service) Limiter() *rate.Limiter { return s.limiter }
@@ -70,7 +75,21 @@ func (s *Service) SetRate(ratePerMinute int) { s.limiter.SetRate(ratePerMinute) 
 
 func (s *Service) SetReadingHandler(fn func(ReadingEvent)) {
 	s.handlerMu.Lock()
-	s.onReading = fn
+	if fn == nil {
+		s.handlers = nil
+	} else {
+		s.handlers = []func(ReadingEvent){fn}
+	}
+	s.handlerMu.Unlock()
+}
+
+// AddReadingHandler adds a callback without replacing existing callbacks.
+func (s *Service) AddReadingHandler(fn func(ReadingEvent)) {
+	if fn == nil {
+		return
+	}
+	s.handlerMu.Lock()
+	s.handlers = append(s.handlers, fn)
 	s.handlerMu.Unlock()
 }
 
@@ -171,6 +190,15 @@ func (s *Service) collectTarget(ctx context.Context, target config.Target, clien
 		result.Err = fmt.Errorf("学校接口未返回有效剩余电量")
 		return result
 	}
+	var previousSurplusCharge *float64
+	if previous, previousErr := s.database.GetLatestReading(target.Campus, target.Building, target.Room); previousErr != nil {
+		// 历史记录只用于通知判断；读取失败不应阻止本次成功采集。
+		// InsertReading 会再次记录数据库错误，便于运维排查。
+		previousSurplusCharge = nil
+	} else if previous != nil && previous.SurplusCharge != nil {
+		value := *previous.SurplusCharge
+		previousSurplusCharge = &value
+	}
 	if err := s.database.InsertReading(target, struct {
 		SurplusCharge *float64
 		Show          map[string]string
@@ -182,10 +210,13 @@ func (s *Service) collectTarget(ctx context.Context, target config.Target, clien
 	result.Reading = reading
 	now := time.Now()
 	s.handlerMu.RLock()
-	handler := s.onReading
+	handlers := append([]func(ReadingEvent){}, s.handlers...)
 	s.handlerMu.RUnlock()
-	if handler != nil {
-		handler(ReadingEvent{TS: now, Target: target, Reading: reading})
+	event := ReadingEvent{TS: now, Target: target, Reading: reading}
+	event.PreviousSurplusCharge = previousSurplusCharge
+	s.notifier.Notify(event.Target, event.Reading, event.PreviousSurplusCharge, event.TS)
+	for _, handler := range handlers {
+		handler(event)
 	}
 	return result
 }
@@ -213,4 +244,12 @@ func (s *Service) WaitIdle(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// Close stops accepting new webhook notifications and waits for queued sends.
+func (s *Service) Close(ctx context.Context) error {
+	if s == nil || s.notifier == nil {
+		return nil
+	}
+	return s.notifier.Close(ctx)
 }

@@ -103,6 +103,120 @@ func TestConfigAPIProtectsFullConfigurationAndMutations(t *testing.T) {
 	}
 }
 
+func TestConfigAPIHandlesWebhookWithoutExposingToken(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
+		cfg.Webhook = config.WebhookConfig{
+			Enabled: true, URL: "http://webhook.test/send", Token: "webhook-secret",
+			NotifyMode: "low_balance", LowBalanceThreshold: 10,
+			Body: map[string]any{"content": "hello", "custom": map[string]any{"enabled": true}},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	admin := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/config?admin=1", nil)
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	server.Handler().ServeHTTP(admin, req)
+	if admin.Code != http.StatusOK {
+		t.Fatalf("admin config status = %d", admin.Code)
+	}
+	if strings.Contains(admin.Body.String(), "webhook-secret") {
+		t.Fatal("webhook token must not be exposed by config API")
+	}
+	if !strings.Contains(admin.Body.String(), `"token_configured":true`) {
+		t.Fatal("config API should report that a webhook token is configured")
+	}
+	if !strings.Contains(admin.Body.String(), `"custom":{"enabled":true}`) {
+		t.Fatal("config API should return the configured webhook body")
+	}
+
+	update := httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"webhook":{"enabled":false}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	server.Handler().ServeHTTP(update, req)
+	if update.Code != http.StatusOK {
+		t.Fatalf("webhook update status = %d body=%s", update.Code, update.Body.String())
+	}
+	if got := server.cfgHub.Config().Webhook.Token; got != "webhook-secret" {
+		t.Fatalf("webhook token was not preserved, got %q", got)
+	}
+
+	update = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"webhook":{"body":{"event":"{{room}}","extra":[1,true]}}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	server.Handler().ServeHTTP(update, req)
+	if update.Code != http.StatusOK {
+		t.Fatalf("webhook body update status = %d body=%s", update.Code, update.Body.String())
+	}
+	webhookCfg := server.cfgHub.Config().Webhook
+	if webhookCfg.Body["event"] != "{{room}}" {
+		t.Fatalf("webhook body was not updated: %#v", webhookCfg.Body)
+	}
+	if webhookCfg.Body["extra"] == nil {
+		t.Fatalf("webhook custom fields were not preserved: %#v", webhookCfg.Body)
+	}
+}
+
+func TestConfigAPIRedactsTargetWebhookToken(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
+		cfg.Targets[0].NotifyMode = "alert"
+		cfg.Targets[0].Webhook = &config.WebhookConfig{
+			Enabled: true, URL: "http://room.test/send", Token: "room-secret",
+			Body: map[string]any{"content": "room"},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	public := httptest.NewRecorder()
+	server.Handler().ServeHTTP(public, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if strings.Contains(public.Body.String(), "room-secret") || strings.Contains(public.Body.String(), `"webhook"`) {
+		t.Fatalf("public config exposed target webhook: %s", public.Body.String())
+	}
+
+	admin := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/config?admin=1", nil)
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	server.Handler().ServeHTTP(admin, req)
+	if strings.Contains(admin.Body.String(), "room-secret") {
+		t.Fatal("admin config exposed target webhook token")
+	}
+	if !strings.Contains(admin.Body.String(), `"webhook"`) || !strings.Contains(admin.Body.String(), `"content":"room"`) {
+		t.Fatalf("admin config omitted target webhook override: %s", admin.Body.String())
+	}
+
+	// A redacted target returned by the API can be submitted back without losing
+	// the stored secret token.
+	var response struct {
+		Targets []config.Target `json:"targets"`
+	}
+	if err := json.Unmarshal(admin.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	updateBody, err := json.Marshal(map[string]any{"targets": response.Targets})
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(updateBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	server.Handler().ServeHTTP(update, req)
+	if update.Code != http.StatusOK {
+		t.Fatalf("redacted target update status = %d body=%s", update.Code, update.Body.String())
+	}
+	if got := server.cfgHub.Config().Targets[0].Webhook.Token; got != "room-secret" {
+		t.Fatalf("target webhook token was not preserved, got %q", got)
+	}
+}
+
 func TestAdminKeyAcceptedFromQueryParameter(t *testing.T) {
 	server := newTestServer(t)
 	handler := server.Handler()
@@ -358,6 +472,20 @@ func TestFaviconIsServedAndReferencedByPages(t *testing.T) {
 		}
 		if !strings.Contains(string(data), `<link rel="icon" href="/favicon.ico"`) {
 			t.Fatalf("%s does not reference /favicon.ico", page)
+		}
+	}
+}
+
+func TestPagesContainProjectFooter(t *testing.T) {
+	const projectURL = "https://github.com/mico-v/wxxyshall_monitoring"
+	for _, page := range []string{"webapp.html", "404.html", "offline.html"} {
+		data, err := readEmbeddedFile(page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		html := string(data)
+		if !strings.Contains(html, `class="site-footer"`) || !strings.Contains(html, projectURL) {
+			t.Errorf("%s does not contain the project footer", page)
 		}
 	}
 }

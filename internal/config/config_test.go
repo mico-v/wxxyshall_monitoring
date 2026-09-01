@@ -141,3 +141,106 @@ func TestConfigNewDefaultsAndLegacyHomepageCompatibility(t *testing.T) {
 		t.Fatal("omitted show_homepage should default to true")
 	}
 }
+
+func TestWebhookConfigDefaultsAndValidation(t *testing.T) {
+	cfg, err := parseConfig([]byte(`{
+  "username":"u","base_url":"https://example.com","targets":[],
+  "poll_interval_minutes":60,"rate_limit_per_minute":30,
+  "webhook":{"enabled":true,"url":"http://10.57.33.51:9966/send","token":"secret","body":{"custom":"value"}}
+}`), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Webhook.NotifyMode != DefaultWebhookMode {
+		t.Fatalf("webhook notify mode = %q, want %q", cfg.Webhook.NotifyMode, DefaultWebhookMode)
+	}
+	if cfg.Webhook.LowBalanceThreshold != DefaultWebhookThreshold {
+		t.Fatalf("webhook threshold = %v, want %v", cfg.Webhook.LowBalanceThreshold, DefaultWebhookThreshold)
+	}
+	if cfg.Webhook.Body["custom"] != "value" {
+		t.Fatalf("webhook body = %#v", cfg.Webhook.Body)
+	}
+
+	cfg.Webhook.NotifyMode = "invalid"
+	if err := ValidateConfig(cfg); err == nil {
+		t.Fatal("invalid webhook notify mode should be rejected")
+	}
+}
+
+func TestLegacyWebhookFieldsMigrateToBody(t *testing.T) {
+	cfg, err := parseConfig([]byte(`{
+  "username":"u","base_url":"https://example.com","targets":[],
+  "poll_interval_minutes":60,"rate_limit_per_minute":30,
+  "webhook":{"enabled":true,"url":"http://example.com/send","token":"secret","umo":"alice","content_template":"{{room}}"}
+}`), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Webhook.Body["content"]; got != "{{room}}" {
+		t.Fatalf("migrated content = %#v", got)
+	}
+	if got := cfg.Webhook.Body["umo"]; got != "alice" {
+		t.Fatalf("migrated umo = %#v", got)
+	}
+	if cfg.Webhook.UMO != "" || cfg.Webhook.ContentTemplate != "" {
+		t.Fatalf("legacy fields should be cleared after migration: %+v", cfg.Webhook)
+	}
+}
+
+func TestDisabledWebhookMayOmitConnectionDetails(t *testing.T) {
+	cfg := testConfigForWebhook()
+	cfg.Webhook = WebhookConfig{}
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("disabled empty webhook should be valid: %v", err)
+	}
+}
+
+func TestTargetNotificationSettings(t *testing.T) {
+	cfg, err := parseConfig([]byte(`{
+  "username":"u","base_url":"https://example.com","targets":[
+    {"campus":"A","building":"B","room":"C","notify_mode":"daily"}
+  ],"poll_interval_minutes":60,"rate_limit_per_minute":30
+}`), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Targets[0].NotifyTime != DefaultTargetNotifyTime {
+		t.Fatalf("target notify time = %q, want %q", cfg.Targets[0].NotifyTime, DefaultTargetNotifyTime)
+	}
+
+	cfg.Targets[0].NotifyMode = "invalid"
+	if err := ValidateConfig(cfg); err == nil {
+		t.Fatal("invalid target notify mode should be rejected")
+	}
+	cfg.Targets[0].NotifyMode = "daily"
+	cfg.Targets[0].NotifyTime = "8:00"
+	if err := ValidateConfig(cfg); err == nil {
+		t.Fatal("non-HH:MM target notify time should be rejected")
+	}
+}
+
+func TestTargetWebhookFallsBackOrOverridesGlobal(t *testing.T) {
+	global := WebhookConfig{
+		Enabled: true, URL: "http://global.test/send", Token: "global-token",
+		Body: map[string]any{"content": "global"},
+	}
+	target := Target{Campus: "A", Building: "B", Room: "C"}
+	if got := target.EffectiveWebhook(global); got.URL != global.URL || got.Token != global.Token || got.Body["content"] != "global" {
+		t.Fatalf("target should inherit global webhook: %+v", got)
+	}
+	target.Webhook = &WebhookConfig{
+		Enabled: true, URL: "http://room.test/send", Token: "room-token",
+		Body: map[string]any{"custom": "room"},
+	}
+	got := target.EffectiveWebhook(global)
+	if got.URL != "http://room.test/send" || got.Token != "room-token" || got.Body["custom"] != "room" {
+		t.Fatalf("target webhook override not applied: %+v", got)
+	}
+}
+
+func testConfigForWebhook() *Config {
+	return &Config{
+		Username: "u", Port: 8080, BaseURL: DefaultBaseURL,
+		PollIntervalMin: 60, RateLimitPerMinute: 30,
+	}
+}

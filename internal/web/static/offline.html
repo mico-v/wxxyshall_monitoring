@@ -33,17 +33,23 @@
   * { box-sizing: border-box; }
   body {
     margin: 0; min-height: 100vh;
-    display: grid; place-items: center; padding: 24px;
+    display: flex; flex-direction: column; align-items: center; padding: 24px;
     background: var(--page); color: var(--ink-1);
     font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC",
                  "Microsoft YaHei", sans-serif;
     line-height: 1.5;
   }
+  .page-main { flex: 1; width: 100%; display: grid; place-items: center; }
   .box {
     text-align: center; max-width: 420px; width: 100%;
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 14px; padding: 48px 36px; box-shadow: var(--shadow);
   }
+  .site-footer {
+    flex: 0 0 auto; color: var(--ink-3); font-size: 12px; text-align: center;
+  }
+  .site-footer a { color: var(--ink-2); text-underline-offset: 2px; }
+  .site-footer a:hover { color: var(--series-1); }
   .icon { font-size: 48px; margin-bottom: 16px; }
   h1 { font-size: 18px; font-weight: 650; margin: 0 0 8px; }
   p { color: var(--ink-2); font-size: 13px; margin: 0 0 26px; }
@@ -56,11 +62,17 @@
 </style>
 </head>
 <body>
-  <div class="box">
-    <div class="icon">📡</div>
-    <h1>网络连接已断开</h1>
-    <p>当前无法连接到服务器。请检查网络连接，稍后重试。<br>离线期间显示的是上次缓存的电费数据。</p>
-    <a class="home" href="/">← 重试连接</a>
-  </div>
+  <main class="page-main">
+    <div class="box">
+      <div class="icon">📡</div>
+      <h1>网络连接已断开</h1>
+      <p>当前无法连接到服务器。请检查网络连接，稍后重试。<br>离线期间显示的是上次缓存的电费数据。</p>
+      <a class="home" href="/">← 重试连接</a>
+    </div>
+  </main>
+  <footer class="site-footer">
+    项目开源于
+    <a href="https://github.com/mico-v/wxxyshall_monitoring" target="_blank" rel="noopener noreferrer">github.com/mico-v/wxxyshall_monitoring</a>
+  </footer>
 </body>
 </html>
