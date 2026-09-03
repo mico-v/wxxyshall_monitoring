@@ -350,6 +350,103 @@ func TestHiddenTargetExcludedFromPublicConfigAndRoomPage(t *testing.T) {
 	}
 }
 
+func TestConfigAPIScopedTargetLookupAndHiddenTargetUnhide(t *testing.T) {
+	server := newTestServer(t)
+	hidden := false
+	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
+		cfg.Targets = append(cfg.Targets, config.Target{
+			FeeItemID: 409, AppID: 34, Campus: "X", Building: "Y", Room: "Z", Label: "hidden", ShowInWeb: &hidden,
+		})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	lookup := func(path string, authorization string) (int, map[string]any) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		if authorization != "" {
+			req.Header.Set("Authorization", authorization)
+		}
+		server.Handler().ServeHTTP(recorder, req)
+		var body map[string]any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+			t.Fatalf("lookup response = %q: %v", recorder.Body.String(), err)
+		}
+		return recorder.Code, body
+	}
+
+	if status, body := lookup("/api/config?campus=A&building=B&room=C", "Bearer 0123456789abcdef"); status != http.StatusOK || body["target_exists"] != true || body["target_hidden"] != false {
+		t.Fatalf("visible lookup = %d %#v", status, body)
+	}
+	if status, body := lookup("/api/config?campus=missing&building=B&room=C", "Bearer 0123456789abcdef"); status != http.StatusOK || body["target_exists"] != false {
+		t.Fatalf("missing lookup = %d %#v", status, body)
+	}
+
+	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
+		cfg.AdminAuthEnabled = false
+		cfg.ShowHomepage = &hidden
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, body := lookup("/api/config?campus=X&building=Y&room=Z", "")
+	if status != http.StatusOK || body["target_exists"] != true || body["target_hidden"] != true {
+		t.Fatalf("hidden lookup = %d %#v", status, body)
+	}
+	if _, ok := body["username"]; ok {
+		t.Fatal("scoped lookup leaked management configuration")
+	}
+
+	unhide := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"target":{"campus":"X","building":"Y","room":"Z","show_in_web":true}}`))
+	req.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(unhide, req)
+	if unhide.Code != http.StatusOK {
+		t.Fatalf("unhide status = %d body=%s", unhide.Code, unhide.Body.String())
+	}
+	cfg := server.cfgHub.Config()
+	if len(cfg.Targets) != 2 || !cfg.Targets[1].IsShownInWeb() {
+		t.Fatalf("unhidden targets = %+v", cfg.Targets)
+	}
+	public := httptest.NewRecorder()
+	server.Handler().ServeHTTP(public, httptest.NewRequest(http.MethodGet, "/api/config?campus=X&building=Y&room=Z", nil))
+	if !strings.Contains(public.Body.String(), `"campus":"X"`) {
+		t.Fatalf("unhidden target missing from scoped public config: %s", public.Body.String())
+	}
+	room := httptest.NewRecorder()
+	server.Handler().ServeHTTP(room, httptest.NewRequest(http.MethodGet, "/room/X/Y/Z", nil))
+	if room.Code != http.StatusOK || strings.Contains(room.Body.String(), "404") {
+		t.Fatalf("unhidden room page status=%d body=%s", room.Code, room.Body.String())
+	}
+}
+
+func TestConfigAPIUnauthenticatedScopedLookupOmitsMetadataWhenAdminAuthEnabled(t *testing.T) {
+	server := newTestServer(t)
+	partial := httptest.NewRecorder()
+	server.Handler().ServeHTTP(partial, httptest.NewRequest(http.MethodGet, "/api/config?campus=A", nil))
+	if partial.Code != http.StatusBadRequest {
+		t.Fatalf("partial lookup status = %d, want 400", partial.Code)
+	}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/config?campus=A&building=B&room=C", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unauthenticated lookup status = %d", recorder.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["target_exists"]; ok {
+		t.Fatal("unauthenticated lookup exposed target existence")
+	}
+	if _, ok := body["target_hidden"]; ok {
+		t.Fatal("unauthenticated lookup exposed target visibility")
+	}
+}
+
 func TestConfigAPIAddsTargetAndOnlyUpdatesLabelForDuplicate(t *testing.T) {
 	server := newTestServer(t)
 	handler := server.Handler()
@@ -426,6 +523,11 @@ func TestWebappHasAdditionOnlySettingsAndImmediateCascadeResetLogic(t *testing.T
 	js := string(data)
 	for _, required := range []string{
 		`function settingsAdditionOnly()`,
+		`function lookupPickedTarget()`,
+		`target_exists`,
+		`target_hidden`,
+		`宿舍已存在`,
+		`show_in_web = true`,
 		`document.getElementById("target-section").hidden = additionOnly`,
 		`fillSelect(selB, [], "— 选择楼栋 —", true)`,
 		`fillSelect(selR, [], "— 选择房间 —", true)`,

@@ -441,11 +441,25 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	managementView := keyAuthorized || (!cfg.AdminAuthEnabled && r.URL.Query().Get("admin") == "1")
+	campus, building, room := r.URL.Query().Get("campus"), r.URL.Query().Get("building"), r.URL.Query().Get("room")
+	if len(campus) > 128 || len(building) > 128 || len(room) > 128 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "campus/building/room 参数过长"})
+		return
+	}
+	roomFilters := 0
+	for _, value := range []string{campus, building, room} {
+		if value != "" {
+			roomFilters++
+		}
+	}
+	if roomFilters != 0 && roomFilters != 3 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "campus/building/room 必须同时提供"})
+		return
+	}
 	publicTargets := apiTargets(cfg.GetWebTargets(), false)
 	if !cfg.IsHomepageShown() && !managementView {
 		publicTargets = nil
-		campus, building, room := r.URL.Query().Get("campus"), r.URL.Query().Get("building"), r.URL.Query().Get("room")
-		if campus != "" && building != "" && room != "" {
+		if roomFilters == 3 {
 			for _, target := range cfg.GetWebTargets() {
 				if target.Campus == campus && target.Building == building && target.Room == room {
 					publicTargets = apiTargets([]config.Target{target}, false)
@@ -459,6 +473,19 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		"defaults":            map[string]int{"feeitemid": config.DefaultFeeItemID, "appId": config.DefaultAppID},
 		"admin_auth_required": cfg.AdminAuthEnabled,
 		"show_homepage":       cfg.IsHomepageShown(),
+	}
+	if roomFilters == 3 && (!cfg.AdminAuthEnabled || managementView) {
+		exists, hidden := false, false
+		key := campus + "|" + building + "|" + room
+		for _, target := range cfg.GetTargets() {
+			if target.Key() == key {
+				exists = true
+				hidden = !target.IsShownInWeb()
+				break
+			}
+		}
+		out["target_exists"] = exists
+		out["target_hidden"] = hidden
 	}
 	if managementView {
 		out["targets"] = apiTargets(cfg.GetTargets(), true)

@@ -722,6 +722,8 @@ function initBackButton() {
 let draftTargets = [];
 let pickCampus = null, pickBuilding = null, pickRoom = null;
 let campusRequestSeq = 0, buildingRequestSeq = 0, roomRequestSeq = 0;
+let targetLookupSeq = 0;
+let pickedTargetLookup = { key: "", loading: false, exists: false, hidden: false, error: null };
 const ADMIN_KEY_SESSION = "elec-admin-key";
 let adminKey = sessionStorage.getItem(ADMIN_KEY_SESSION) || "";
 // 允许通过 /?key=... 直接打开管理页面；读取后立即从地址栏移除，避免密钥留在历史记录/复制链接中。
@@ -872,6 +874,7 @@ async function loadRooms(campus, building) {
 
 function resetPicker() {
   pickCampus = pickBuilding = pickRoom = null;
+  resetTargetLookup();
   const requestSeq = ++campusRequestSeq;
   buildingRequestSeq++;
   roomRequestSeq++;
@@ -891,15 +894,64 @@ function resetPicker() {
   });
 }
 
+function selectedTargetKey() {
+  return pickCampus && pickBuilding && pickRoom
+    ? `${pickCampus.value}|${pickBuilding.value}|${pickRoom.value}`
+    : "";
+}
+
+function resetTargetLookup() {
+  targetLookupSeq++;
+  pickedTargetLookup = { key: "", loading: false, exists: false, hidden: false, error: null };
+}
+
+async function lookupPickedTarget() {
+  const key = selectedTargetKey();
+  if (!key) {
+    resetTargetLookup();
+    updatePreview();
+    return;
+  }
+  const seq = ++targetLookupSeq;
+  pickedTargetLookup = { key, loading: true, exists: false, hidden: false, error: null };
+  updatePreview();
+  const params = new URLSearchParams({ campus: pickCampus.value, building: pickBuilding.value, room: pickRoom.value });
+  try {
+    const result = await responseJSON(await adminFetch(`/api/config?${params.toString()}`));
+    if (seq !== targetLookupSeq || selectedTargetKey() !== key) return;
+    if (typeof result.target_exists !== "boolean") throw new Error("宿舍查询结果不可用");
+    pickedTargetLookup = {
+      key, loading: false, exists: result.target_exists,
+      hidden: result.target_exists && result.target_hidden === true, error: null,
+    };
+  } catch (error) {
+    if (seq !== targetLookupSeq || selectedTargetKey() !== key) return;
+    pickedTargetLookup = { key, loading: false, exists: false, hidden: false, error };
+  }
+  updatePreview();
+}
+
 function updatePreview() {
   const preview = document.getElementById("pick-preview");
   const addBtn = document.getElementById("pick-add");
-  if (pickCampus && pickBuilding && pickRoom) {
-    preview.textContent = `将添加: ${pickCampus.name}/${pickBuilding.name}/${pickRoom.name}`;
+  const label = pickCampus && pickBuilding && pickRoom
+    ? `${pickCampus.name}/${pickBuilding.name}/${pickRoom.name}` : "";
+  const lookup = pickedTargetLookup;
+  addBtn.disabled = true;
+  addBtn.textContent = "添加";
+  if (!label) {
+    preview.textContent = "";
+  } else if (lookup.loading || lookup.key !== selectedTargetKey()) {
+    preview.textContent = "正在查询宿舍…";
+  } else if (lookup.error) {
+    preview.textContent = "查询失败: " + lookup.error.message;
+  } else if (lookup.exists) {
+    preview.textContent = lookup.hidden ? "宿舍已存在（进入后自动解除隐藏）" : "宿舍已存在";
+    addBtn.textContent = "查看宿舍";
     addBtn.disabled = false;
   } else {
-    preview.textContent = "";
-    addBtn.disabled = true;
+    preview.textContent = `将添加: ${label}`;
+    addBtn.disabled = false;
   }
 }
 
@@ -963,6 +1015,7 @@ function initSettings() {
     const opt = e.target.selectedOptions[0];
     pickCampus = opt.value ? { value: opt.value, name: opt.dataset.name } : null;
     pickBuilding = pickRoom = null;
+    resetTargetLookup();
     const requestSeq = ++buildingRequestSeq;
     roomRequestSeq++;
     fillSelect(selB, [], "— 选择楼栋 —", true);
@@ -985,6 +1038,7 @@ function initSettings() {
     const opt = e.target.selectedOptions[0];
     pickBuilding = opt.value ? { value: opt.value, name: opt.dataset.name } : null;
     pickRoom = null;
+    resetTargetLookup();
     const requestSeq = ++roomRequestSeq;
     fillSelect(selR, [], "— 选择房间 —", true);
     document.getElementById("pick-tag").value = "";
@@ -1007,16 +1061,25 @@ function initSettings() {
     pickRoom = opt.value ? { value: opt.value, name: opt.dataset.name } : null;
     document.getElementById("pick-tag").value = pickRoom ? pickRoom.name : "";
     updatePreview();
+    if (pickRoom) lookupPickedTarget().catch(() => {});
   });
 
   document.getElementById("pick-add").addEventListener("click", async () => {
     if (!(pickCampus && pickBuilding && pickRoom)) return;
+    const key = selectedTargetKey();
+    const lookup = pickedTargetLookup;
+    if (lookup.key !== key || lookup.loading || lookup.error) return;
     const t = {
       feeitemid: state.defaults.feeitemid, appId: state.defaults.appId,
       campus: pickCampus.value, building: pickBuilding.value, room: pickRoom.value,
       label: document.getElementById("pick-tag").value.trim() || `${pickCampus.name}/${pickBuilding.name}/${pickRoom.name}`,
     };
-    const replacing = draftTargets.some(existing => matchRoom(existing, t));
+    if (lookup.exists && !lookup.hidden) {
+      modal.hidden = true;
+      navigate({ campus: t.campus, building: t.building, room: t.room, label: t.label });
+      return;
+    }
+    if (lookup.exists && lookup.hidden) t.show_in_web = true;
     const addBtn = document.getElementById("pick-add");
     addBtn.disabled = true;
     try {
@@ -1024,20 +1087,24 @@ function initSettings() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ target: t }),
       }));
-      if (settingsAdditionOnly()) {
+      if (lookup.exists && lookup.hidden) {
+        modal.hidden = true;
+        navigate({ campus: t.campus, building: t.building, room: t.room, label: t.label });
+      } else if (settingsAdditionOnly()) {
         modal.hidden = true;
         navigate({ campus: t.campus, building: t.building, room: t.room, label: t.label });
         await refreshPublicConfig();
       } else {
         draftTargets = (body.targets || []).map(x => ({ ...x }));
         renderTargetList();
-        document.getElementById("pick-preview").textContent = replacing ? "已更新宿舍 tag" : "已添加并自动保存";
+        document.getElementById("pick-preview").textContent = "已添加并自动保存";
         await refreshPublicConfig();
         await refresh();
       }
     } catch (e) {
       document.getElementById("pick-preview").textContent = "保存失败: " + e.message;
     } finally {
+      resetTargetLookup();
       fillSelect(selB, [], "— 选择楼栋 —", true);
       fillSelect(selR, [], "— 选择房间 —", true);
       pickBuilding = pickRoom = null;
