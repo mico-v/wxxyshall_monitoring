@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -177,7 +178,9 @@ func TestConfigAPIRedactsTargetWebhookToken(t *testing.T) {
 
 	public := httptest.NewRecorder()
 	server.Handler().ServeHTTP(public, httptest.NewRequest(http.MethodGet, "/api/config", nil))
-	if strings.Contains(public.Body.String(), "room-secret") || strings.Contains(public.Body.String(), `"webhook"`) {
+	// 公开视图允许出现 "webhook": null（表示该宿舍继承全局 webhook），
+	// 但绝不能泄露任何 webhook 配置数据。
+	if strings.Contains(public.Body.String(), "room-secret") || strings.Contains(public.Body.String(), "room.test") {
 		t.Fatalf("public config exposed target webhook: %s", public.Body.String())
 	}
 
@@ -214,6 +217,32 @@ func TestConfigAPIRedactsTargetWebhookToken(t *testing.T) {
 	}
 	if got := server.cfgHub.Config().Targets[0].Webhook.Token; got != "room-secret" {
 		t.Fatalf("target webhook token was not preserved, got %q", got)
+	}
+}
+
+func TestAddTargetWritesFullConfigFile(t *testing.T) {
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"target":{"feeitemid":409,"appId":34,"campus":"X","building":"Y","room":"Z"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("add target status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	data, err := os.ReadFile(config.ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	for _, key := range []string{
+		`"campus": "X"`, `"building": "Y"`, `"room": "Z"`,
+		`"label": "X/Y/Z"`, `"show_in_web": true`, `"poll_interval_minutes": 60`,
+		`"notify_mode": ""`, `"notify_time": ""`, `"webhook": null`,
+	} {
+		if !strings.Contains(out, key) {
+			t.Fatalf("config.json missing %s after add:\n%s", key, out)
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -192,6 +193,60 @@ func TestDisabledWebhookMayOmitConnectionDetails(t *testing.T) {
 	cfg.Webhook = WebhookConfig{}
 	if err := ValidateConfig(cfg); err != nil {
 		t.Fatalf("disabled empty webhook should be valid: %v", err)
+	}
+}
+
+func TestNormalizeFillsTargetFieldDefaults(t *testing.T) {
+	cfg, err := parseConfig([]byte(`{
+  "username":"u","base_url":"https://example.com","targets":[{"campus":"A","building":"B","room":"C"}],
+  "poll_interval_minutes":60,"rate_limit_per_minute":30
+}`), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := cfg.Targets[0]
+	if target.ShowInWeb == nil || !*target.ShowInWeb {
+		t.Fatal("show_in_web should default to true")
+	}
+	if target.PollIntervalMin == nil || *target.PollIntervalMin != 60 {
+		t.Fatalf("poll_interval_minutes default = %v, want 60", target.PollIntervalMin)
+	}
+	if target.FeeItemID != DefaultFeeItemID || target.AppID != DefaultAppID {
+		t.Fatalf("feeitemid/appId defaults = %d/%d", target.FeeItemID, target.AppID)
+	}
+	if target.Label != "A/B/C" {
+		t.Fatalf("label default = %q, want A/B/C", target.Label)
+	}
+	// 无显式通知配置时保持空串，运行时继承全局 webhook 规则。
+	if target.NotifyMode != "" || target.NotifyTime != "" || target.Webhook != nil {
+		t.Fatalf("notify fields should stay empty: %+v", target)
+	}
+}
+
+func TestSaveConfigWritesAllTargetFields(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("ELEc_DIR", root)
+	cfg := &Config{
+		Username: "u", Port: 8080, BaseURL: "https://example.com",
+		PollIntervalMin: 60, RateLimitPerMinute: 30,
+		Targets: []Target{{Campus: "A", Building: "B", Room: "C"}},
+	}
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		`"feeitemid": 409`, `"appId": 34`,
+		`"campus": "A"`, `"building": "B"`, `"room": "C"`,
+		`"label": "A/B/C"`, `"show_in_web": true`, `"poll_interval_minutes": 60`,
+		`"notify_mode": ""`, `"notify_time": ""`, `"webhook": null`,
+	} {
+		if !strings.Contains(string(data), key) {
+			t.Fatalf("config.json missing %s:\n%s", key, data)
+		}
 	}
 }
 

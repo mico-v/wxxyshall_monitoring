@@ -32,17 +32,19 @@ const (
 
 // Target 代表一个监控宿舍目标。
 type Target struct {
-	FeeItemID       int            `json:"feeitemid"`
-	AppID           int            `json:"appId"`
-	Campus          string         `json:"campus"`
-	Building        string         `json:"building"`
-	Room            string         `json:"room"`
-	Label           string         `json:"label"`
-	ShowInWeb       *bool          `json:"show_in_web,omitempty"`
-	PollIntervalMin *int           `json:"poll_interval_minutes,omitempty"`
-	NotifyMode      string         `json:"notify_mode,omitempty"`
-	NotifyTime      string         `json:"notify_time,omitempty"`
-	Webhook         *WebhookConfig `json:"webhook,omitempty"`
+	FeeItemID int    `json:"feeitemid"`
+	AppID     int    `json:"appId"`
+	Campus    string `json:"campus"`
+	Building  string `json:"building"`
+	Room      string `json:"room"`
+	Label     string `json:"label"`
+	// ShowInWeb/PollIntervalMin 由 normalizeConfig 补齐默认值后始终写出；
+	// NotifyMode/NotifyTime/Webhook 允许空值显式写出（""/null），空值表示继承全局默认配置。
+	ShowInWeb       *bool          `json:"show_in_web"`
+	PollIntervalMin *int           `json:"poll_interval_minutes"`
+	NotifyMode      string         `json:"notify_mode"`
+	NotifyTime      string         `json:"notify_time"`
+	Webhook         *WebhookConfig `json:"webhook"`
 }
 
 // WebhookConfig 是采集成功通知的配置。
@@ -423,6 +425,15 @@ func normalizeConfig(cfg *Config) {
 		t.Label = strings.TrimSpace(t.Label)
 		t.NotifyMode = strings.TrimSpace(t.NotifyMode)
 		t.NotifyTime = strings.TrimSpace(t.NotifyTime)
+		// 补齐有默认值的字段，使每次保存后配置文件包含全部字段。
+		if t.ShowInWeb == nil {
+			shown := true
+			t.ShowInWeb = &shown
+		}
+		if t.PollIntervalMin == nil {
+			interval := cfg.PollIntervalMin
+			t.PollIntervalMin = &interval
+		}
 		if t.NotifyMode == "daily" && t.NotifyTime == "" {
 			t.NotifyTime = DefaultTargetNotifyTime
 		}
