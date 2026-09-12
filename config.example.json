@@ -7,6 +7,7 @@
   "rate_limit_per_minute": 30,
   "admin_auth_enabled": false,
   "show_homepage": true,
+  "allow_guest_add_target": true,
   "webhook": {
     "enabled": false,
     "url": "",

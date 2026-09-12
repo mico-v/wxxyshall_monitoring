@@ -24,7 +24,7 @@ document.getElementById("theme-btn").addEventListener("click", () => {
 });
 
 /* ============ SSE 实时推送 ============ */
-let eventSource = null;
+let sseAbort = null;
 let sseConnected = false;
 let pollTimer = null;
 let sseRefreshTimer = null;
@@ -46,10 +46,9 @@ function scheduleReadingRefresh() {
 }
 
 function connectSSE() {
-  if (eventSource) { eventSource.close(); eventSource = null; }
-  sseConnected = false;
-  if (!state.room && !state.showHomepage) {
-    startPollingFallback();
+  closeSSE();
+  if (!aggregateReadable()) {   // 主页隐藏且未登录:不订阅聚合事件
+    stopPollingFallback();
     return;
   }
   stopPollingFallback();
@@ -60,37 +59,79 @@ function connectSSE() {
     q.set("room", state.room.room);
   }
   const eventURL = "/api/events" + (q.toString() ? "?" + q.toString() : "");
-  try {
-    eventSource = new EventSource(eventURL);
-  } catch (e) {
-    console.warn('SSE 初始化失败:', e);
-    startPollingFallback();
-    return;
+  const headers = new Headers();
+  if (!state.room && !state.showHomepage && adminKey) {
+    headers.set("Authorization", `Bearer ${adminKey}`);
   }
 
-  eventSource.addEventListener('reading', function(e) {
-    try {
-      const data = JSON.parse(e.data);
-      if (!state.room ||
-          (state.room.campus === data.campus &&
-           state.room.building === data.building &&
-           state.room.room === data.room)) {
-        scheduleReadingRefresh();
-      }
-    } catch (err) { console.warn('SSE reading 解析失败:', err); }
-  });
-
-  eventSource.addEventListener('heartbeat', function() {
-    sseConnected = true;
-  });
-
-  eventSource.onerror = function() {
-    sseConnected = false;
-    eventSource.close();
-    startPollingFallback();
-  };
-
+  const controller = new AbortController();
+  sseAbort = controller;
   sseConnected = true;
+  (async () => {
+    try {
+      const response = await fetch(eventURL, {
+        headers, cache: "no-store", signal: controller.signal,
+      });
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      if (!response.body) throw new Error("浏览器不支持流式响应");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let end;
+        while ((end = buffer.indexOf("\n\n")) >= 0) {
+          handleSSEBlock(buffer.slice(0, end));
+          buffer = buffer.slice(end + 2);
+        }
+      }
+    } catch (err) {
+      if (controller.signal.aborted) return;   // 主动断开:不需要兜底
+      const reason = err && err.message ? err.message : String(err);
+      console.warn("SSE 连接中断:", reason);
+      // 密钥失效或主页改为隐藏:立即纠正本地状态(会断开本连接)。
+      if (reason === "HTTP 401") markHomepageHidden();
+    }
+    if (sseAbort !== controller) return;   // 已被新连接替换/主动关闭
+    sseAbort = null;
+    sseConnected = false;
+    startPollingFallback();
+  })();
+}
+
+// 服务端事件格式固定为 "event: <name>\ndata: <json>\n\n"(见 internal/web/sse.go)。
+function handleSSEBlock(block) {
+  let event = "message";
+  const data = [];
+  for (const line of block.split("\n")) {
+    if (!line || line.startsWith(":")) continue;
+    const colon = line.indexOf(":");
+    if (colon < 0) continue;
+    const field = line.slice(0, colon);
+    const value = line.slice(colon + 1).replace(/^ /, "");
+    if (field === "event") event = value;
+    else if (field === "data") data.push(value);
+  }
+  if (!data.length) return;
+  if (event === "heartbeat") { sseConnected = true; return; }
+  if (event !== "reading") return;
+  try {
+    const reading = JSON.parse(data.join("\n"));
+    if (!state.room ||
+        (state.room.campus === reading.campus &&
+         state.room.building === reading.building &&
+         state.room.room === reading.room)) {
+      scheduleReadingRefresh();
+    }
+  } catch (err) { console.warn("SSE reading 解析失败:", err); }
+}
+
+// 主动断开 SSE 连接(切换宿舍/隐藏主页/退出登录时调用)。
+function closeSSE() {
+  if (sseAbort) { sseAbort.abort(); sseAbort = null; }
+  sseConnected = false;
 }
 
 function startPollingFallback() {
@@ -173,10 +214,98 @@ let state = {
   room: null,         // 当前查看的宿舍 {campus,building,room,label},null=全部
   adminAuthRequired: false,
   showHomepage: true,
-  homepageUnlocked: false,
+  guestAddAllowed: false,   // 未登录能否添加宿舍(服务端派生的 guest_add_allowed)
+  homeUnlocked: false,      // 本次已通过主页验证
+  view: null,               // computeViewState() 的结果,唯一视图状态
   tablePage: 1,
   tablePageSize: 10,
 };
+
+/* ============ 显示状态机 ============ */
+// 配置(show_homepage / guest_add_allowed) × 路径(主页还是宿舍页) × 登录态
+// 推导出唯一的视图状态:显隐、请求条件、SSE 作用域都从这里读,
+// 不再散落 "!state.room && !state.showHomepage" 之类的组合判断。
+function aggregateReadable() {
+  // 聚合数据(全部宿舍)可读的条件:主页公开,或本次已通过验证。
+  // 宿舍页(state.room)读的是单间公开数据,不受主页可见性影响,同样放行。
+  return !!state.room || state.showHomepage || state.homeUnlocked;
+}
+
+function computeViewState() {
+  const home = !state.room;
+  const aggregate = aggregateReadable();
+  return {
+    home,
+    aggregate,
+    picker: home && !aggregate,      // 主页隐藏且未登录:显示宿舍选择器落地页
+    adminUnlocked: !!adminKey,
+    canAdd: !!adminKey || state.guestAddAllowed,
+  };
+}
+
+// 选择器整块在「查询设置」弹窗与主页落地页之间搬移;
+// DOM 节点搬移不会丢失已绑定的事件监听,所以 initSettings() 只绑定一次。
+function mountPickerBlock(targetId) {
+  const block = document.getElementById("picker-block");
+  const target = document.getElementById(targetId);
+  if (!block || !target || block.parentElement === target) return;
+  target.appendChild(block);
+}
+
+// applyViewState 是唯一写视图 DOM 的地方,可重复调用(幂等)。
+function applyViewState() {
+  const view = computeViewState();
+  const previous = state.view;
+  state.view = view;
+
+  document.body.dataset.view = view.home ? (view.picker ? "home-picker" : "home") : "room";
+  document.getElementById("dash").hidden = !view.aggregate;
+  document.getElementById("home-picker").hidden = !view.picker;
+  mountPickerBlock(view.picker ? "home-picker-mount" : "settings-picker-mount");
+
+  document.getElementById("settings-btn").hidden = view.picker;
+  document.getElementById("collect-btn").hidden = view.picker;
+  if (view.picker) document.getElementById("collect-cancel-btn").hidden = true;
+  document.getElementById("logout-btn").hidden = !view.adminUnlocked;
+  document.getElementById("back-btn").hidden = !(state.room && view.aggregate);
+
+  if (view.picker) {
+    state.data = [];   // 退出登录后不再把聚合读数留在内存里
+    document.getElementById("home-picker-hint").textContent = state.guestAddAllowed
+      ? "选择校区/楼栋/房间即可进入或添加宿舍"
+      : "登录后可添加宿舍并查看全部宿舍数据";
+    syncHomePicker(view.canAdd);
+  } else {
+    homePickerReady = false;   // 离开落地页:下次进入时重新加载校区
+  }
+
+  // 主页可见性/宿舍切换会改变 SSE 的作用域(聚合 ↔ 单宿舍),需要重连或断开。
+  view.scopeKey = view.aggregate ? (state.room ? roomKey(state.room) : "") : null;
+  if (!previous || previous.scopeKey !== view.scopeKey) syncSSE(view);
+  return view;
+}
+
+function syncSSE(view) {
+  if (view.aggregate) {
+    connectSSE();
+    return;
+  }
+  closeSSE();
+  stopPollingFallback();
+}
+
+// 主页落地页的选择器:有权添加时才加载校区(加载校区可能触发密钥提示)。
+let homePickerReady = false;
+function syncHomePicker(canAdd) {
+  if (!canAdd) {
+    homePickerReady = false;
+    document.getElementById("pick-preview").textContent = "登录后即可添加宿舍";
+    return;
+  }
+  if (homePickerReady) return;
+  homePickerReady = true;
+  resetPicker();
+}
 
 /* ============ 路径导航(History API) ============ */
 // 每间宿舍一个独立 URL:/room/<campus>/<building>/<room>;"/" = 全部宿舍全览。
@@ -198,18 +327,15 @@ function navigate(room, replace = false) {
   state.tablePage = 1;
   window.scrollTo(0, 0);
   history[replace ? "replaceState" : "pushState"]({ room }, "", pathFor(room));
+  applyViewState();   // 切换视图并重连 SSE(作用域变了)
   refresh();
-  connectSSE();
 }
-window.addEventListener("popstate", async () => {   // 浏览器前进/后退
+window.addEventListener("popstate", () => {   // 浏览器前进/后退
   state.room = roomFromPath();
   state.tablePage = 1;
   window.scrollTo(0, 0);
-  if (!state.room && !state.showHomepage && !state.homepageUnlocked) {
-    await unlockHomepage();
-  }
+  applyViewState();
   refresh();
-  connectSSE();
 });
 
 function readingsURL() {
@@ -224,13 +350,29 @@ function readingsURL() {
   return "/api/readings" + (suffix ? "?" + suffix : "");
 }
 
+// 服务端明确以 401 告知「主页已隐藏」时调用:本地状态(可能来自过期缓存)
+// 与服务器不一致,立即切回落地页,不再重复发注定 401 的请求。
+function markHomepageHidden() {
+  if (state.room) return;                          // 宿舍页公开,与主页可见性无关
+  const wasUnlocked = state.homeUnlocked;
+  if (!state.showHomepage && !wasUnlocked) return; // 已隐藏且未登录:无需重复处理
+  state.showHomepage = false;
+  state.homeUnlocked = false;
+  applyViewState();   // scopeKey 变化会断开 SSE 并停止轮询兜底
+  toast(wasUnlocked ? "登录已失效，请重新登录" : "主页已隐藏，请登录后查看");
+}
+
 async function fetchReadings() {
   const headers = new Headers();
-  if (!state.room && !state.showHomepage) {
-    if (!state.homepageUnlocked || !adminKey) throw new Error("主页需要管理密钥");
+  if (!state.room && !state.showHomepage && adminKey) {
     headers.set("Authorization", `Bearer ${adminKey}`);
   }
   const r = await fetch(readingsURL(), { cache: "no-store", headers });
+  if (r.status === 401) {
+    // 服务器拒绝聚合读数 = 主页对当前请求不可见;纠正本地视图后抛出。
+    markHomepageHidden();
+    throw new Error("HTTP 401");
+  }
   if (!r.ok) throw new Error("HTTP " + r.status);
   return await r.json();
 }
@@ -243,7 +385,7 @@ async function refreshPublicConfig() {
     q.set("room", state.room.room);
   }
   const headers = new Headers();
-  if (!state.room && state.homepageUnlocked && adminKey) {
+  if (!state.room && state.homeUnlocked && adminKey) {
     headers.set("Authorization", `Bearer ${adminKey}`);
   }
   const suffix = q.toString();
@@ -252,51 +394,43 @@ async function refreshPublicConfig() {
   const cfg = await r.json();
   const nextTargets = cfg.targets || [];
   const changed = JSON.stringify(nextTargets) !== JSON.stringify(state.targets);
-  const previousHomepageVisibility = state.showHomepage;
   state.targets = nextTargets;
   if (cfg.defaults) state.defaults = cfg.defaults;
   state.adminAuthRequired = cfg.admin_auth_required === true;
   state.showHomepage = cfg.show_homepage !== false;
-  if (!state.room) {
-    document.body.dataset.showHomepage = String(state.showHomepage);
-    if (!state.showHomepage && !state.homepageUnlocked) {
-      document.body.classList.remove("homepage-unlocked");
-    }
-  }
+  state.guestAddAllowed = cfg.guest_add_allowed === true;
+  applyViewState();
   if (changed && state.data.length) render();
-  else if (previousHomepageVisibility !== state.showHomepage) renderBackButton();
-  if (previousHomepageVisibility !== state.showHomepage && (eventSource || pollTimer)) connectSSE();
   return cfg;
 }
 
 let configPollTimer = null;
 function startConfigPolling() {
   if (configPollTimer) clearInterval(configPollTimer);
+  // 只刷新配置并让状态机重算视图;不再在这里抢解锁(会和启动流程互相吞掉弹窗)。
   configPollTimer = setInterval(() => {
-    refreshPublicConfig().then(async () => {
-      if (!state.room && !state.showHomepage && !state.homepageUnlocked) {
-        await unlockHomepage();
-        await refreshPublicConfig();
-        await refresh();
-      }
-    }).catch(e => console.warn("配置刷新失败:", e));
+    refreshPublicConfig().catch(e => console.warn("配置刷新失败:", e));
   }, 30000);
 }
 
 /* 刷新序号:并发刷新时丢弃过期结果,避免旧 fetch 覆盖新数据(钻取/返回快速切换时) */
 let refreshSeq = 0;
 async function refresh() {
+  // 主页隐藏且未登录:没有可读的聚合数据,不发注定 401 的请求。
+  if (!aggregateReadable()) return true;
   const seq = ++refreshSeq;
   const dash = document.getElementById("dash");
   dash.classList.add("refreshing");
   try {
     const data = await fetchReadings();
-    if (seq !== refreshSeq) return;      // 已有更新的刷新,丢弃本次结果
+    if (seq !== refreshSeq) return true;      // 已有更新的刷新,丢弃本次结果
     state.data = data;
     render();
+    return true;
   } catch (e) {
-    if (seq !== refreshSeq) return;
+    if (seq !== refreshSeq) return true;
     console.error("读取失败:", e);
+    return false;
   } finally {
     if (seq === refreshSeq) dash.classList.remove("refreshing");
   }
@@ -309,7 +443,6 @@ function render() {
   state.groups.forEach(g => {
     state.colorByKey[roomKey(g.rows[0])] = roomColorFor(g.rows[0]);
   });
-  renderBackButton();
   renderKpis();
   renderChart();
   const detailCard = document.getElementById("detail-card");
@@ -319,11 +452,6 @@ function render() {
   // 每间宿舍一个独立页面标题
   const roomLabel = state.room && state.groups.length ? state.groups[0].label : "";
   document.title = roomLabel ? `宿舍电费 · ${roomLabel}` : "宿舍电费监控";
-}
-
-function renderBackButton() {
-  const btn = document.getElementById("back-btn");
-  if (btn) btn.hidden = !state.room || !state.showHomepage;
 }
 
 function renderKpis() {
@@ -724,15 +852,39 @@ let pickCampus = null, pickBuilding = null, pickRoom = null;
 let campusRequestSeq = 0, buildingRequestSeq = 0, roomRequestSeq = 0;
 let targetLookupSeq = 0;
 let pickedTargetLookup = { key: "", loading: false, exists: false, hidden: false, error: null };
-const ADMIN_KEY_SESSION = "elec-admin-key";
-let adminKey = sessionStorage.getItem(ADMIN_KEY_SESSION) || "";
+const ADMIN_KEY_STORE = "elec-admin-key";
+
+// 管理密钥长效保存在 localStorage:登录一次后长期有效,直到「退出登录」清除。
+// (旧版本存在 sessionStorage,读取时迁移过来后删除。)
+function loadStoredKey() {
+  try {
+    const stored = localStorage.getItem(ADMIN_KEY_STORE);
+    if (stored) return stored;
+    const legacy = sessionStorage.getItem(ADMIN_KEY_STORE);
+    if (legacy) {
+      localStorage.setItem(ADMIN_KEY_STORE, legacy);
+      sessionStorage.removeItem(ADMIN_KEY_STORE);
+      return legacy;
+    }
+  } catch (e) { console.warn("读取管理密钥失败:", e); }
+  return "";
+}
+
+function saveStoredKey(key) {
+  adminKey = (key || "").trim();
+  try {
+    if (adminKey) localStorage.setItem(ADMIN_KEY_STORE, adminKey);
+    else localStorage.removeItem(ADMIN_KEY_STORE);
+  } catch (e) { console.warn("保存管理密钥失败:", e); }
+}
+
+let adminKey = loadStoredKey();
 // 允许通过 /?key=... 直接打开管理页面；读取后立即从地址栏移除，避免密钥留在历史记录/复制链接中。
 try {
   const directURL = new URL(location.href);
   const keyFromURL = directURL.searchParams.get("key");
   if (keyFromURL && keyFromURL.trim()) {
-    adminKey = keyFromURL.trim();
-    sessionStorage.setItem(ADMIN_KEY_SESSION, adminKey);
+    saveStoredKey(keyFromURL);
     directURL.searchParams.delete("key");
     const clean = directURL.pathname + directURL.search + directURL.hash;
     history.replaceState(history.state, "", clean);
@@ -744,7 +896,6 @@ function initAdminPrompt() {
   const modal = document.getElementById("admin-modal");
   const input = document.getElementById("admin-key-input");
   const finish = value => {
-    if (modal.classList.contains("home-gate") && !value) return;
     modal.hidden = true;
     const resolve = adminPromptResolver;
     adminPromptResolver = null;
@@ -754,40 +905,30 @@ function initAdminPrompt() {
   document.getElementById("admin-cancel").addEventListener("click", () => finish(""));
   input.addEventListener("keydown", event => {
     if (event.key === "Enter") { event.preventDefault(); finish(input.value.trim()); }
-    if (event.key === "Escape" && !modal.classList.contains("home-gate")) { event.preventDefault(); finish(""); }
+    if (event.key === "Escape") { event.preventDefault(); finish(""); }
   });
-  modal.addEventListener("click", event => {
-    if (event.target === modal && !modal.classList.contains("home-gate")) finish("");
-  });
+  modal.addEventListener("click", event => { if (event.target === modal) finish(""); });
 }
 
-function promptAdminKey(required = false) {
+// 所有密钥询问都由用户操作触发(登录/采集/查询设置),因此弹窗始终可以取消。
+function promptAdminKey() {
   if (adminPromptResolver) return Promise.resolve("");
-  const modal = document.getElementById("admin-modal");
   const input = document.getElementById("admin-key-input");
   input.value = "";
-  modal.classList.toggle("home-gate", required);
-  document.getElementById("admin-cancel").hidden = required;
-  document.getElementById("admin-title").textContent = required ? "主页访问验证" : "管理鉴权";
-  document.getElementById("admin-prompt-hint").textContent = required
-    ? "主页已隐藏，请输入管理鉴权密钥后加载主页和数据。"
-    : "密钥只保存在当前浏览器标签页，关闭标签页后失效。";
-  modal.hidden = false;
+  document.getElementById("admin-modal").hidden = false;
   setTimeout(() => input.focus(), 0);
   return new Promise(resolve => { adminPromptResolver = resolve; });
 }
 
 async function adminFetch(url, options = {}) {
-  const { forceAdminKey = false, ...fetchOptions } = options;
-  const headers = new Headers(fetchOptions.headers || {});
-  if (adminKey && (forceAdminKey || state.adminAuthRequired || state.homepageUnlocked)) {
-    headers.set("Authorization", `Bearer ${adminKey}`);
-  }
-  const response = await fetch(url, { ...fetchOptions, headers, cache: fetchOptions.cache || "no-store" });
-  if (response.status === 401) {
-    adminKey = "";
-    sessionStorage.removeItem(ADMIN_KEY_SESSION);
-  }
+  const headers = new Headers(options.headers || {});
+  // 只要手里有密钥就带上:它以作为"已验证的管理员"身份存在,
+  // 失效时启动校验和 401 处理都会把它清掉,不需要各处再组合开关判断。
+  if (adminKey) headers.set("Authorization", `Bearer ${adminKey}`);
+  const response = await fetch(url, {
+    ...options, headers, cache: options.cache || "no-store",
+  });
+  if (response.status === 401) saveStoredKey("");
   return response;
 }
 
@@ -801,44 +942,63 @@ async function responseJSON(response) {
   return body;
 }
 
-async function ensureAdmin() {
-  if (!state.adminAuthRequired) return true;
-  return ensureAdminKey(false);
+// 校验一个密钥:有效时落盘,无效(401)时清掉已存的密钥;
+// 网络/服务异常原样抛出,避免误清空有效密钥或陷入反复弹窗。
+async function verifyAdminKey(key) {
+  const headers = new Headers({ Authorization: `Bearer ${key}` });
+  const response = await fetch("/api/admin/verify", { method: "POST", headers, cache: "no-store" });
+  if (response.status === 401) { saveStoredKey(""); return false; }
+  await responseJSON(response);
+  saveStoredKey(key);
+  return true;
 }
 
-async function ensureAdminKey(required) {
-  if (adminKey) {
-    try {
-      await responseJSON(await adminFetch("/api/admin/verify", { method: "POST", forceAdminKey: true }));
-      return true;
-    } catch (e) {
-      if (adminKey && !required) throw e;
-    }
+// 启动时校验已保存的长效密钥:服务端轮换/清空密钥后不再带着失效密钥发请求。
+async function verifyStoredKey() {
+  if (!adminKey) return false;
+  try {
+    return await verifyAdminKey(adminKey);
+  } catch (e) {
+    console.warn("校验已保存的管理密钥失败:", e);
+    return false;
   }
+}
+
+async function ensureAdmin() {
+  if (!state.adminAuthRequired) return true;
+  return ensureAdminKey();
+}
+
+// 反复询问直到拿到有效密钥或用户取消(取消返回 false,调用方静默返回)。
+async function ensureAdminKey() {
+  if (adminKey && await verifyAdminKey(adminKey)) return true;
   while (true) {
-    const entered = await promptAdminKey(required);
+    const entered = (await promptAdminKey() || "").trim();
     if (!entered) return false;
-    adminKey = entered.trim();
-    try {
-      await responseJSON(await adminFetch("/api/admin/verify", { method: "POST", forceAdminKey: true }));
-      sessionStorage.setItem(ADMIN_KEY_SESSION, adminKey);
-      return true;
-    } catch (e) {
-      adminKey = "";
-      sessionStorage.removeItem(ADMIN_KEY_SESSION);
-      if (!required) throw e;
-      toast("管理密钥无效，请重新输入", true);
-    }
+    if (await verifyAdminKey(entered)) return true;
+    toast("管理密钥无效，请重新输入", true);
   }
 }
 
 async function unlockHomepage() {
-  if (state.room || state.showHomepage || state.homepageUnlocked) return true;
-  const unlocked = await ensureAdminKey(true);
-  if (!unlocked) return false;
-  state.homepageUnlocked = true;
-  document.body.classList.add("homepage-unlocked");
+  if (aggregateReadable()) return true;
+  if (!await ensureAdminKey()) return false;
+  state.homeUnlocked = true;
+  applyViewState();
+  // 带密钥重新拉取配置,补齐隐藏主页时不返回的完整宿舍列表。
+  try { await refreshPublicConfig(); }
+  catch (e) { console.warn("解锁后刷新配置失败:", e); }
+  await refresh();
   return true;
+}
+
+function logout() {
+  if (!adminKey) return;
+  saveStoredKey("");
+  state.homeUnlocked = false;
+  homePickerReady = false;
+  applyViewState();
+  toast("已退出登录");
 }
 
 function discoveryParams(extra = {}) {
@@ -979,23 +1139,27 @@ function renderTargetList() {
   });
 }
 
-function settingsAdditionOnly() {
-  return !!state.room && !state.adminAuthRequired && !state.showHomepage;
-}
-
 async function openSettings() {
-  if (!await ensureAdmin()) return;
-  const additionOnly = settingsAdditionOnly();
-  document.getElementById("target-section").hidden = additionOnly;
-  if (additionOnly) {
-    draftTargets = [];
-    document.getElementById("target-list").textContent = "";
-  } else {
+  const view = computeViewState();
+  if (!view.canAdd) {
+    // 未登录且不允许访客添加:这个弹窗没有任何可用的操作,先登录。
+    if (!await ensureAdminKey()) return;
+  } else if (!await ensureAdmin()) {
+    return;
+  }
+  // 主页隐藏时不在弹窗里列出全部宿舍(与公开主页口径一致);持密钥的管理员始终可见完整列表。
+  const showTargets = state.showHomepage || !!adminKey;
+  document.getElementById("target-section").hidden = !showTargets;
+  if (showTargets) {
     const cfg = await responseJSON(await adminFetch("/api/config?admin=1"));
     draftTargets = (cfg.targets || []).map(t => ({ ...t }));
     renderTargetList();
+  } else {
+    draftTargets = [];
+    document.getElementById("target-list").textContent = "";
   }
   resetPicker();
+  homePickerReady = false;   // 选择器已搬到弹窗,落地页下次进入时重新初始化
   document.getElementById("settings-modal").hidden = false;
 }
 
@@ -1090,7 +1254,8 @@ function initSettings() {
       if (lookup.exists && lookup.hidden) {
         modal.hidden = true;
         navigate({ campus: t.campus, building: t.building, room: t.room, label: t.label });
-      } else if (settingsAdditionOnly()) {
+      } else if (!adminKey) {
+        // 访客添加(主页落地页内联选择器或主页隐藏时的单宿舍页):直接进入该宿舍。
         modal.hidden = true;
         navigate({ campus: t.campus, building: t.building, room: t.room, label: t.label });
         await refreshPublicConfig();
@@ -1272,44 +1437,51 @@ async function resumeCollectJob() {
   }
 }
 
+/* ============ 缓存兜底(离线) ============ */
+async function loadCachedConfig() {
+  if (!('caches' in window)) return;
+  try {
+    const cached = await caches.match('/api/config');
+    if (!cached) return;
+    const cfg = await cached.json();
+    if (!cfg) return;
+    if (cfg.targets) state.targets = cfg.targets;
+    if (cfg.defaults) state.defaults = cfg.defaults;
+    state.showHomepage = state.showHomepage && cfg.show_homepage !== false;
+    state.guestAddAllowed = cfg.guest_add_allowed === true;
+  } catch (e) { console.warn('缓存配置加载失败:', e); }
+}
+
+async function loadCachedReadings() {
+  if (!('caches' in window) || !aggregateReadable()) return;
+  try {
+    const cached = await caches.match(readingsURL());
+    if (!cached) return;
+    const data = await cached.json();
+    if (Array.isArray(data)) {
+      state.data = data;
+      render();
+    }
+  } catch (e) { console.warn('缓存读数加载失败:', e); }
+}
+
 /* ============ 启动 ============ */
 async function boot() {
   state.room = roomFromPath();
+  // 服务端预渲染的 data-show-homepage 只用于首屏不闪烁;权威状态一律来自 /api/config。
+  // 启动时绝不弹窗:主页隐藏就直接渲染宿舍选择器落地页,由用户决定是否登录。
   state.showHomepage = document.body.dataset.showHomepage !== "false";
 
-  // 服务端已把主页开关写入页面，关闭时先验证，绝不预载缓存或读数。
-  if (!state.room && !state.showHomepage) await unlockHomepage();
-
+  // 先校验长效密钥:失效(服务端轮换/清空)时清掉,避免带着无效密钥请求公开配置被 401。
+  await verifyStoredKey();
   try {
     await refreshPublicConfig();
-    if (!state.room && !state.showHomepage) await unlockHomepage();
-    await refresh();
   } catch (e) {
     console.warn('网络加载失败,尝试使用缓存数据:', e);
-    if ('caches' in window) {
-      try {
-        const cachedConfig = await caches.match('/api/config');
-        if (cachedConfig) {
-          const cfg = await cachedConfig.json();
-          if (cfg && cfg.targets) state.targets = cfg.targets;
-          if (cfg && cfg.defaults) state.defaults = cfg.defaults;
-          if (cfg) state.showHomepage = cfg.show_homepage !== false;
-        }
-        if (!state.room && !state.showHomepage) await unlockHomepage();
-        const cachedReadings = await caches.match(readingsURL());
-        if (cachedReadings) {
-          const data = await cachedReadings.json();
-          if (Array.isArray(data)) {
-            state.data = data;
-            render();
-          }
-        }
-      } catch (cacheError) { console.warn('缓存加载失败:', cacheError); }
-    }
+    await loadCachedConfig();
   }
-
-  // 连接 SSE 实时推送
-  connectSSE();
+  applyViewState();   // 首次渲染 + 按需连接 SSE
+  if (!await refresh()) await loadCachedReadings();
   startConfigPolling();
   resumeCollectJob();
 }
@@ -1320,6 +1492,10 @@ initTablePagination();
 initAdminPrompt();
 initSettings();
 document.getElementById("collect-btn").addEventListener("click", collectNow);
+document.getElementById("home-login-btn").addEventListener("click", () => {
+  unlockHomepage().catch(e => toast("登录失败: " + e.message, true));
+});
+document.getElementById("logout-btn").addEventListener("click", logout);
 document.getElementById("collect-cancel-btn").addEventListener("click", async function() {
   const btn = document.getElementById("collect-cancel-btn");
   btn.disabled = true;

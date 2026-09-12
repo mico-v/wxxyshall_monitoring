@@ -15,7 +15,8 @@
 - 单宿舍读数明细默认每页 10 条，可切换每页数量并使用上一页/下一页浏览。
 - 仪表盘按 `config.json` 中的目标顺序显示和采集。网页“查询设置”只提供级联添加宿舍；其他字段、排序和已有宿舍调整统一手工编辑 `config.json`。
 - PWA 可安装，离线时使用最近缓存的公开配置和读数；管理请求和带鉴权请求绝不缓存。
-- 可通过 `admin_auth_enabled` 控制修改、采集、发现、任务状态/取消和 token 推送接口是否需要管理密钥。
+- 可通过 `admin_auth_enabled` 控制修改、采集、发现、任务状态/取消和 token 推送接口是否需要管理密钥；`allow_guest_add_target` 可单独禁止未登录访客添加宿舍。
+- `show_homepage=false` 时主页显示宿舍选择器而不是聚合数据，可跳转或添加宿舍；进入聚合数据需登录密钥，浏览器一次登录后长期保留。
 - 支持配置 webhook 通知；默认在监控宿舍余额首次进入低值区间时发送一次，余额恢复后重新触发。
 
 项目没有自动更新功能。升级由管理员替换二进制并重启服务完成。
@@ -115,7 +116,7 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
 
 GitHub Actions 位于 `.github/workflows/release.yml`。推送到 `main` 会构建并上传 Linux amd64/arm64、Windows amd64 工件；推送 `v*` 标签还会自动创建 GitHub Release 并附加压缩包。
 
-首次运行会生成 `$ELEc_DIR/data/config.json` 和 `$ELEc_DIR/data/.admin_key`。默认打开 `http://localhost:5009`；`admin_auth_enabled` 默认关闭，开启后进入“查询设置”需输入管理密钥。也可直接打开 `http://localhost:5009/?key=<管理密钥>`；网页读取后会把 `key` 从地址栏移除，并只保存到当前标签页的 `sessionStorage`。
+首次运行会生成 `$ELEc_DIR/data/config.json` 和 `$ELEc_DIR/data/.admin_key`。默认打开 `http://localhost:5009`；`admin_auth_enabled` 默认关闭，开启后进入“查询设置”需输入管理密钥。也可直接打开 `http://localhost:5009/?key=<管理密钥>`；网页读取后会把 `key` 从地址栏移除，并长期保存在本浏览器的 `localStorage` 中，可随时点「退出登录」清除。
 
 ### systemd 安装
 
@@ -177,6 +178,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
   "rate_limit_per_minute": 30,
   "admin_auth_enabled": false,
   "show_homepage": true,
+  "allow_guest_add_target": true,
   "webhook": {
     "enabled": false,
     "url": "http://10.57.33.51:9966/send",
@@ -198,7 +200,8 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 - `poll_interval_minutes` 为 `1..10080`。
 - `rate_limit_per_minute` 为 `1..600`。例如 `30` 表示任意两次学校 HTTP 请求至少间隔 2 秒，并非一分钟突发 30 次。
 - `admin_auth_enabled` 默认 `false`；开启后管理 API 需要密钥。无论是否开启，程序仍会生成 `.admin_key`，密钥验证接口也始终严格校验。
-- `show_homepage` 默认 `true`；关闭后主页要求输入管理密钥才加载聚合数据，单宿舍页不再显示返回主页按钮。它与 `admin_auth_enabled` 同时关闭时，单宿舍页的查询设置仅允许添加宿舍，添加成功后自动跳转。
+- `show_homepage` 默认 `true`；关闭后主页不再显示全部宿舍的聚合数据，而是显示与单宿舍页「查询设置」一致的宿舍选择器（可跳转或添加宿舍），查看聚合数据需先输入管理密钥，单宿舍页也不再显示返回主页按钮。
+- `allow_guest_add_target` 默认 `true`；仅在 `admin_auth_enabled=false` 时生效。设为 `false` 后，未登录访客不能添加宿舍（网页入口和 `POST /api/config` 都要求管理密钥），适合「主页隐藏 + 管理鉴权关闭」仍不希望访客自行添加宿舍的部署。
 - 每个目标的 `feeitemid`、`appId` 必须为正整数，`campus/building/room` 非空且组合不可重复。
 - 目标的 `show_in_web` 可省略，默认 `true`；设为 `false` 后仍会定时/手动采集，但不会出现在公开配置、读数、宿舍页面或 SSE 中。
 - 目标的 `poll_interval_minutes` 可省略；省略时继承全局 `poll_interval_minutes`，设置后以该宿舍的 `1..10080` 分钟周期覆盖全局值。
@@ -215,7 +218,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 ## 安全边界
 
 - 管理密钥存放于数据目录的 `.admin_key`，服务启动时读取；不会写入 `config.json` 或 systemd unit，即使 `admin_auth_enabled=false` 也依然生成。
-- 浏览器只把密钥放在 `sessionStorage`，关闭标签页后失效。单宿舍仪表盘和读数保持公开；`show_homepage=false` 时聚合主页和聚合读数需要密钥。
+- 浏览器把密钥长期保存在 `localStorage`，登录一次后无需重复输入，直到点「退出登录」；启动时会校验一次，失效即刻清除。单宿舍仪表盘和读数保持公开；`show_homepage=false` 时聚合主页、聚合读数和聚合 SSE 需要密钥。
 - 管理 API 使用 `Authorization: Bearer <key>`，也接受 `?key=<key>`。生产部署建议放在 HTTPS 反向代理后；查询参数可能出现在代理访问日志中，应限制日志访问并避免分享含密钥的原始链接。
 - JSON 请求限制为 1 MiB、拒绝未知字段和多余 JSON；配置、token 使用临时文件 + `fsync` + 原子替换保存。
 - 默认安装服务不以 root 运行，数据目录及敏感文件采用受限权限。

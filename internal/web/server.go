@@ -473,6 +473,8 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		"defaults":            map[string]int{"feeitemid": config.DefaultFeeItemID, "appId": config.DefaultAppID},
 		"admin_auth_required": cfg.AdminAuthEnabled,
 		"show_homepage":       cfg.IsHomepageShown(),
+		// 前端唯一需要的"未登录能否添加宿舍"判据：管理鉴权开启时任何人添加都要密钥。
+		"guest_add_allowed": s.guestAddAllowed(cfg),
 	}
 	if roomFilters == 3 && (!cfg.AdminAuthEnabled || managementView) {
 		exists, hidden := false, false
@@ -524,6 +526,14 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeJSON(w, jsonDecodeStatus(err), map[string]string{"error": "JSON 解析失败: " + err.Error()})
+		return
+	}
+	// 「添加宿舍」是网页唯一对外开放的配置写入路径，可由 allow_guest_add_target
+	// 单独收紧。admin_auth_enabled=true 时 requireAdmin 已拦下所有未鉴权请求，
+	// 这里只处理管理鉴权关闭、但运维不希望访客自行添加宿舍的部署。
+	if body.Target != nil && !s.checkAdminKey(r) && !s.cfgHub.Config().IsGuestAddAllowed() {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="elec-admin"`)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录，禁止添加宿舍"})
 		return
 	}
 	if body.Port != nil && (*body.Port < 1024 || *body.Port > 65535) {
@@ -1169,6 +1179,12 @@ func (s *Server) checkAdminKey(r *http.Request) bool {
 
 func adminCredentialProvided(r *http.Request) bool {
 	return r.Header.Get("Authorization") != "" || r.URL.Query().Has("key")
+}
+
+// guestAddAllowed 返回未登录访客能否添加宿舍。
+// 管理鉴权开启时一律为 false（requireAdmin 会拦下无密钥的写请求）。
+func (s *Server) guestAddAllowed(cfg *config.Config) bool {
+	return !cfg.AdminAuthEnabled && cfg.IsGuestAddAllowed()
 }
 
 // CloseSSE 关闭 SSE Hub，断开所有 SSE 客户端连接。

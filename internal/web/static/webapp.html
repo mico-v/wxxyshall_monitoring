@@ -65,8 +65,10 @@
                  "Microsoft YaHei", sans-serif;
     line-height: 1.5;
   }
-  body[data-show-homepage="false"] #app-shell { display: none; }
-  body[data-show-homepage="false"].homepage-unlocked #app-shell { display: block; }
+  /* data-view 由 app.js 设置,设置后这两条首屏提示即失效 */
+  body[data-view="home-picker"] #dash { display: none; }
+  body:not([data-view])[data-show-homepage="false"] #dash { display: none; }
+  #dash[hidden], #home-picker[hidden] { display: none; }
   #app-shell { flex: 1 0 auto; width: 100%; }
   .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 20px 48px; min-width: 0; }
   @media (max-width: 480px) { .wrap { padding: 16px 12px 36px; } }
@@ -159,7 +161,6 @@
     display: flex; align-items: flex-start; justify-content: center;
     padding: 8vh 16px 24px;
   }
-  .modal-overlay.home-gate { align-items: center; padding-top: 24px; }
   .modal-overlay[hidden] { display: none; }
   .modal {
     background: var(--surface); border: 1px solid var(--border);
@@ -197,6 +198,14 @@
 
   .picker { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 8px; }
   @media (max-width: 560px) { .picker { grid-template-columns: 1fr 1fr; } }
+  /* 选择器在「查询设置」弹窗和主页隐藏时的落地页之间整体搬移,两处样式统一。 */
+  #picker-block h3 {
+    font-size: 13px; font-weight: 600; color: var(--ink-2);
+    margin: 18px 0 8px;
+  }
+  #settings-picker-mount > #picker-block > h3 { margin-top: 8px; }
+  #home-picker-mount > #picker-block > h3 { margin-top: 4px; }
+  #home-picker .card-bd > .label-hint { margin-bottom: 4px; }
   .picker select {
     font: inherit; font-size: 13px; color: var(--ink-1);
     background: var(--surface); border: 1px solid var(--border);
@@ -352,6 +361,7 @@
       <button class="btn" id="collect-btn" type="button">⚡ 立即采集</button>
       <button class="theme-btn" id="collect-cancel-btn" type="button" hidden>取消采集</button>
       <button class="theme-btn" id="settings-btn" type="button">查询设置</button>
+      <button class="theme-btn" id="logout-btn" type="button" hidden>退出登录</button>
       <button class="theme-btn" id="theme-btn" type="button">深色</button>
     </div>
   </header>
@@ -406,6 +416,21 @@
       </div>
     </div>
   </div>
+
+  <!-- 主页隐藏(show_homepage=false)且未登录时的落地页:
+       不再用弹窗挡住整页,直接给出与「查询设置」一致的宿舍选择器。 -->
+  <section class="card" id="home-picker" hidden>
+    <div class="card-hd">
+      <h2>主页已隐藏</h2>
+      <span class="hint" id="home-picker-hint">选择宿舍即可进入对应页面</span>
+    </div>
+    <div class="card-bd">
+      <div id="home-picker-mount"></div>
+      <div class="settings-actions">
+        <button class="btn" id="home-login-btn" type="button">登录查看全部宿舍</button>
+      </div>
+    </div>
+  </section>
 </div>
 
 <footer class="site-footer">
@@ -415,7 +440,7 @@
 
 <div id="toast" role="status" aria-live="polite"></div>
 
-<!-- 管理密钥输入：仅保存到当前标签页的 sessionStorage -->
+<!-- 管理密钥输入：验证成功后长效保存在浏览器 localStorage，可「退出登录」清除 -->
 <div class="modal-overlay" id="admin-modal" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="admin-title" style="max-width:420px">
     <div class="modal-hd"><h2 id="admin-title">管理鉴权</h2></div>
@@ -423,7 +448,7 @@
       <label class="field">管理密钥
         <input id="admin-key-input" type="password" autocomplete="new-password" maxlength="256" spellcheck="false">
       </label>
-      <div class="label-hint" id="admin-prompt-hint">密钥只保存在当前浏览器标签页，关闭标签页后失效。</div>
+      <div class="label-hint" id="admin-prompt-hint">密钥验证后长期保存在本浏览器，可随时「退出登录」清除。</div>
       <div class="settings-actions">
         <button id="admin-cancel" class="theme-btn" type="button">取消</button>
         <button id="admin-submit" class="btn" type="button">验证</button>
@@ -445,17 +470,22 @@
         <div id="target-list" class="target-list"></div>
       </section>
 
-      <h3>添加宿舍(电费)</h3>
-      <div class="picker">
-        <select id="pick-campus"><option value="">— 选择校区 —</option></select>
-        <select id="pick-building" disabled><option value="">— 选择楼栋 —</option></select>
-        <select id="pick-room" disabled><option value="">— 选择房间 —</option></select>
-        <button id="pick-add" class="btn" disabled>添加</button>
+      <!-- 选择器整块在弹窗与主页落地页之间搬移(appendChild 不丢失事件监听) -->
+      <div id="settings-picker-mount">
+        <section id="picker-block">
+          <h3>添加宿舍(电费)</h3>
+          <div class="picker">
+            <select id="pick-campus"><option value="">— 选择校区 —</option></select>
+            <select id="pick-building" disabled><option value="">— 选择楼栋 —</option></select>
+            <select id="pick-room" disabled><option value="">— 选择房间 —</option></select>
+            <button id="pick-add" class="btn" disabled>添加</button>
+          </div>
+          <label class="tag-field" for="pick-tag">宿舍 tag / 别名
+            <input id="pick-tag" type="text" maxlength="40" placeholder="例如：我的宿舍">
+          </label>
+          <div class="label-hint" id="pick-preview"></div>
+        </section>
       </div>
-      <label class="tag-field" for="pick-tag">宿舍 tag / 别名
-        <input id="pick-tag" type="text" maxlength="40" placeholder="例如：我的宿舍">
-      </label>
-      <div class="label-hint" id="pick-preview"></div>
     </div>
   </div>
 </div>

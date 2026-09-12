@@ -307,6 +307,10 @@ func TestHiddenHomepageRequiresKeyForAggregateDataButKeepsRoomPublic(t *testing.
 	if root.Code != http.StatusOK || !strings.Contains(root.Body.String(), `data-show-homepage="false"`) {
 		t.Fatalf("hidden homepage shell status=%d marker=%v", root.Code, strings.Contains(root.Body.String(), `data-show-homepage="false"`))
 	}
+	// 主页隐藏时服务端仍渲染选择器落地页,由 app.js 决定显隐(不再整页隐藏)。
+	if !strings.Contains(root.Body.String(), `id="home-picker"`) {
+		t.Fatal("hidden homepage shell omitted the room picker landing page")
+	}
 
 	aggregate := httptest.NewRecorder()
 	handler.ServeHTTP(aggregate, httptest.NewRequest(http.MethodGet, "/api/readings", nil))
@@ -476,6 +480,93 @@ func TestConfigAPIUnauthenticatedScopedLookupOmitsMetadataWhenAdminAuthEnabled(t
 	}
 }
 
+func TestConfigAPIReportsGuestAddPolicy(t *testing.T) {
+	server := newTestServer(t)
+	handler := server.Handler()
+	readPolicy := func() bool {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("config status = %d", recorder.Code)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		allowed, ok := body["guest_add_allowed"].(bool)
+		if !ok {
+			t.Fatalf("guest_add_allowed missing from public config: %s", recorder.Body.String())
+		}
+		return allowed
+	}
+
+	if readPolicy() {
+		t.Fatal("admin_auth_enabled=true should disable guest additions")
+	}
+	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
+		cfg.AdminAuthEnabled = false
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !readPolicy() {
+		t.Fatal("admin auth off should allow guest additions by default")
+	}
+	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
+		deny := false
+		cfg.AllowGuestAdd = &deny
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if readPolicy() {
+		t.Fatal("allow_guest_add_target=false should disable guest additions")
+	}
+}
+
+func TestGuestAddTargetPolicyRejectsKeylessAdditions(t *testing.T) {
+	server := newTestServer(t)
+	handler := server.Handler()
+	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
+		cfg.AdminAuthEnabled = false
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	add := func(auth, room string) *httptest.ResponseRecorder {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		body := fmt.Sprintf(`{"target":{"campus":"G","building":"H","room":%q}}`, room)
+		req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		handler.ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	// 字段省略时保持旧行为:未登录访客可以直接添加。
+	if recorder := add("", "I"); recorder.Code != http.StatusOK {
+		t.Fatalf("default guest add status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
+		deny := false
+		cfg.AllowGuestAdd = &deny
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if recorder := add("", "J"); recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("keyless add with guest additions disabled = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder := add("Bearer 0123456789abcdef", "J"); recorder.Code != http.StatusOK {
+		t.Fatalf("admin add with guest additions disabled = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestConfigAPIAddsTargetAndOnlyUpdatesLabelForDuplicate(t *testing.T) {
 	server := newTestServer(t)
 	handler := server.Handler()
@@ -544,20 +635,28 @@ func TestWebappSettingsOnlyExposeDormitoryAddition(t *testing.T) {
 	}
 }
 
-func TestWebappHasAdditionOnlySettingsAndImmediateCascadeResetLogic(t *testing.T) {
+func TestWebappViewStateMachineAndCascadeResetLogic(t *testing.T) {
 	data, err := readEmbeddedFile("app.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	js := string(data)
 	for _, required := range []string{
-		`function settingsAdditionOnly()`,
+		`function aggregateReadable()`,
+		`function computeViewState()`,
+		`function applyViewState()`,
+		`function syncHomePicker(`,
+		`cfg.show_homepage !== false`,
+		`cfg.guest_add_allowed === true`,
+		`localStorage.setItem(ADMIN_KEY_STORE, adminKey)`,
+		`localStorage.removeItem(ADMIN_KEY_STORE)`,
+		`function logout()`,
 		`function lookupPickedTarget()`,
 		`target_exists`,
 		`target_hidden`,
 		`宿舍已存在`,
 		`show_in_web = true`,
-		`document.getElementById("target-section").hidden = additionOnly`,
+		`document.getElementById("target-section").hidden = !showTargets`,
 		`fillSelect(selB, [], "— 选择楼栋 —", true)`,
 		`fillSelect(selR, [], "— 选择房间 —", true)`,
 		`requestSeq !== buildingRequestSeq`,
@@ -567,6 +666,38 @@ func TestWebappHasAdditionOnlySettingsAndImmediateCascadeResetLogic(t *testing.T
 		if !strings.Contains(js, required) {
 			t.Errorf("app.js omitted behavior marker %q", required)
 		}
+	}
+	// 启动时不得再用弹窗挡住整页(旧 homepage-unlocked 协议已移除)。
+	// data-show-homepage 只作为首屏提示读取,不再参与显隐逻辑。
+	for _, forbidden := range []string{`homepageUnlocked`, `homepage-unlocked`} {
+		if strings.Contains(js, forbidden) {
+			t.Errorf("app.js still contains legacy marker %q", forbidden)
+		}
+	}
+}
+
+func TestWebappHomePickerFallbackMarkup(t *testing.T) {
+	data, err := readEmbeddedFile("webapp.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(data)
+	for _, required := range []string{
+		`id="home-picker"`,
+		`id="home-picker-mount"`,
+		`id="settings-picker-mount"`,
+		`id="picker-block"`,
+		`id="home-login-btn"`,
+		`id="logout-btn"`,
+		// 整页隐藏会只剩页脚顶到最上方,不能再有 app-shell 级别的隐藏规则。
+	} {
+		if !strings.Contains(html, required) {
+			t.Errorf("webapp.html omitted %s", required)
+		}
+	}
+	if strings.Contains(html, `#app-shell { display: none`) ||
+		strings.Contains(html, `data-show-homepage="false"] #app-shell`) {
+		t.Error("webapp.html must not hide the whole app shell when the homepage is hidden")
 	}
 }
 
@@ -889,7 +1020,7 @@ func TestPWAAssetsAreEmbeddedAndConsistent(t *testing.T) {
 
 	swRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(swRecorder, httptest.NewRequest(http.MethodGet, "/sw.js", nil))
-	if swRecorder.Code != http.StatusOK || !strings.Contains(swRecorder.Body.String(), "`${CACHE_PREFIX}v10`") {
+	if swRecorder.Code != http.StatusOK || !strings.Contains(swRecorder.Body.String(), "`${CACHE_PREFIX}v13`") {
 		t.Fatalf("service worker response invalid: status=%d", swRecorder.Code)
 	}
 	if got := swRecorder.Header().Get("Cache-Control"); got != "no-cache" {

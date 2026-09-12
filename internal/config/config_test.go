@@ -141,6 +141,29 @@ func TestConfigNewDefaultsAndLegacyHomepageCompatibility(t *testing.T) {
 	if !cfg.IsHomepageShown() {
 		t.Fatal("omitted show_homepage should default to true")
 	}
+	if !cfg.IsGuestAddAllowed() {
+		t.Fatal("omitted allow_guest_add_target should default to true")
+	}
+}
+
+func TestGuestAddTargetOption(t *testing.T) {
+	cfg, err := parseConfig([]byte(`{
+  "username":"u","base_url":"https://example.com","targets":[],
+  "poll_interval_minutes":60,"rate_limit_per_minute":30,
+  "allow_guest_add_target":false
+}`), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.IsGuestAddAllowed() {
+		t.Fatal("allow_guest_add_target=false should disable guest additions")
+	}
+	if clone := cfg.Clone(); clone.IsGuestAddAllowed() {
+		t.Fatal("Clone should keep the guest-add setting")
+	}
+	if cfg.AllowGuestAdd == cfg.Clone().AllowGuestAdd {
+		t.Fatal("Clone should deep-copy the guest-add pointer")
+	}
 }
 
 func TestWebhookConfigDefaultsAndValidation(t *testing.T) {

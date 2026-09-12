@@ -108,6 +108,7 @@ type Config struct {
 	RateLimitPerMinute int           `json:"rate_limit_per_minute"`
 	AdminAuthEnabled   bool          `json:"admin_auth_enabled"`
 	ShowHomepage       *bool         `json:"show_homepage"`
+	AllowGuestAdd      *bool         `json:"allow_guest_add_target"`
 	Webhook            WebhookConfig `json:"webhook"`
 }
 
@@ -115,6 +116,15 @@ type Config struct {
 // The pointer keeps older configuration files compatible: an omitted field defaults to true.
 func (c *Config) IsHomepageShown() bool {
 	return c == nil || c.ShowHomepage == nil || *c.ShowHomepage
+}
+
+// IsGuestAddAllowed reports whether a visitor without the admin key may add a
+// target. It only matters while AdminAuthEnabled is false: with admin auth on,
+// requireAdmin rejects every unauthenticated mutation regardless of this value.
+// The pointer keeps older configuration files compatible: omitted means true,
+// which is the behaviour before this field existed.
+func (c *Config) IsGuestAddAllowed() bool {
+	return c == nil || c.AllowGuestAdd == nil || *c.AllowGuestAdd
 }
 
 // Clone 返回可安全交给调用方修改的深拷贝。
@@ -127,6 +137,10 @@ func (c *Config) Clone() *Config {
 	if c.ShowHomepage != nil {
 		value := *c.ShowHomepage
 		cp.ShowHomepage = &value
+	}
+	if c.AllowGuestAdd != nil {
+		value := *c.AllowGuestAdd
+		cp.AllowGuestAdd = &value
 	}
 	cp.Webhook.Body = cloneJSONMap(c.Webhook.Body)
 	for i := range cp.Targets {
@@ -409,6 +423,10 @@ func normalizeConfig(cfg *Config) {
 	if cfg.ShowHomepage == nil {
 		shown := true
 		cfg.ShowHomepage = &shown
+	}
+	if cfg.AllowGuestAdd == nil {
+		allowed := true
+		cfg.AllowGuestAdd = &allowed
 	}
 	normalizeWebhook(&cfg.Webhook)
 	for i := range cfg.Targets {

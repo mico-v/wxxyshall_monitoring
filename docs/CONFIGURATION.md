@@ -43,6 +43,7 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
   "rate_limit_per_minute": 30,
   "admin_auth_enabled": false,
   "show_homepage": true,
+  "allow_guest_add_target": true,
   "webhook": {
     "enabled": false,
     "url": "http://10.57.33.51:9966/send",
@@ -64,8 +65,9 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
 - `base_url`：学校服务地址，通常无需修改；
 - `poll_interval_minutes`：全局采集间隔，范围 `1..10080` 分钟；
 - `rate_limit_per_minute`：定时和手动电费采集的学校接口请求速率，范围 `1..600`；网页添加宿舍时使用的校区、楼栋、房间发现接口不受此项限制，由进程内缓存和并发合并管理；
-- `admin_auth_enabled`：管理接口是否要求管理密钥，默认 `false`。关闭时仍会生成和保留 `.admin_key`，且主页解锁用的密钥校验接口仍严格验证；
-- `show_homepage`：是否公开显示全部宿舍主页，默认 `true`。设为 `false` 后，单宿舍页不显示返回主页按钮，访问主页必须先输入管理密钥；当它与 `admin_auth_enabled` 同时为 `false` 时，单宿舍页的查询设置只提供添加宿舍，添加后自动跳转到该宿舍；
+- `admin_auth_enabled`：管理接口是否要求管理密钥，默认 `false`。关闭时仍会生成和保留 `.admin_key`，且密钥校验接口 `/api/admin/verify` 始终严格验证；
+- `show_homepage`：是否公开显示全部宿舍主页，默认 `true`。设为 `false` 后，主页不再展示全部宿舍的聚合数据，而是显示一个与单宿舍页「查询设置」一致的宿舍选择器（可跳转或添加宿舍），进入聚合数据需要先输入管理密钥；单宿舍页不显示返回主页按钮。无论该开关如何取值，单宿舍页始终公开可访问；
+- `allow_guest_add_target`：未登录访客能否添加宿舍，默认 `true`（与旧版本行为一致）。仅在 `admin_auth_enabled=false` 时生效——管理鉴权开启时任何添加都需要密钥。设为 `false` 后，网页「添加宿舍」和 `POST /api/config` 的单宿舍添加都需要带管理密钥，否则返回 401；
 - `webhook`：采集通知配置。`enabled` 为 `true` 时向 `url` 发送 `webhook.body` 中定义的 JSON 对象，并使用 `Authorization: Bearer <token>` 鉴权。`body` 支持任意 JSON 字段、嵌套对象和数组；程序不会内置或追加 `content`、`umo` 等字段。每个成功采集的宿舍会按照自己的 `notify_mode` 决定是否发送。
 - `webhook.body` 中的字符串支持 `{{label}}`、`{{campus}}`、`{{building}}`、`{{room}}`、`{{ts}}`、`{{surplus_charge}}`、`{{low_balance_threshold}}`、`{{total_usage}}` 占位符，替换会递归应用到嵌套对象和数组。旧版顶层 `umo` / `content_template` 配置会自动迁移到 `body`。
 - `webhook.notify_mode` 及 `low_balance_threshold` 为全局 webhook 的兼容配置；宿舍未设置 `notify_mode` 时，仍可使用 `low_balance`、`balance_decrease` 或 `every_collection` 规则。新配置建议使用宿舍级 `notify_mode`。
@@ -79,4 +81,4 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
 - 目标的 `notify_time`：每日通知时间，使用 `HH:MM` 格式，仅 `daily` 模式使用；省略时默认为 `08:00`。每日通知按宿舍分别去重，发送失败会在下次成功采集时重试。
 - 目标的 `webhook`：可选的完整 webhook 覆盖配置。省略时使用全局 `webhook`；配置后覆盖该宿舍的 `enabled`、`url`、`token`、阈值和 `body` 等设置。设置 `webhook.enabled=false` 可单独关闭该宿舍通知。
 
-配置和 token 支持热重载。webhook、宿舍、主页/鉴权开关、显示开关、采集间隔和限流修改后约两秒生效；端口变化需要重启。webhook 消息发送成功和失败都会记录日志，但不会使本次采集失败。
+配置和 token 支持热重载。webhook、宿舍、主页/鉴权开关、访客添加开关、显示开关、采集间隔和限流修改后约两秒生效；端口变化需要重启。webhook 消息发送成功和失败都会记录日志，但不会使本次采集失败。
