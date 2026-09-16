@@ -642,10 +642,13 @@ func TestWebappViewStateMachineAndCascadeResetLogic(t *testing.T) {
 	}
 	js := string(data)
 	for _, required := range []string{
+		`function adminVerified()`,
 		`function aggregateReadable()`,
 		`function computeViewState()`,
 		`function applyViewState()`,
 		`function syncHomePicker(`,
+		// 已保存的密钥校验通过即视为已登录,主页直接进入聚合视图(不必再点登录)。
+		`state.keyVerified = true`,
 		`cfg.show_homepage !== false`,
 		`cfg.guest_add_allowed === true`,
 		`localStorage.setItem(ADMIN_KEY_STORE, adminKey)`,

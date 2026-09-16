@@ -200,7 +200,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 - `poll_interval_minutes` 为 `1..10080`。
 - `rate_limit_per_minute` 为 `1..600`。例如 `30` 表示任意两次学校 HTTP 请求至少间隔 2 秒，并非一分钟突发 30 次。
 - `admin_auth_enabled` 默认 `false`；开启后管理 API 需要密钥。无论是否开启，程序仍会生成 `.admin_key`，密钥验证接口也始终严格校验。
-- `show_homepage` 默认 `true`；关闭后主页不再显示全部宿舍的聚合数据，而是显示与单宿舍页「查询设置」一致的宿舍选择器（可跳转或添加宿舍），查看聚合数据需先输入管理密钥，单宿舍页也不再显示返回主页按钮。
+- `show_homepage` 默认 `true`；关闭后未登录访客打开主页看到的是与单宿舍页「查询设置」一致的宿舍选择器（可跳转或添加宿舍），不显示聚合数据；已登录时主页直接显示聚合仪表盘，单宿舍页也不再显示返回主页按钮。
 - `allow_guest_add_target` 默认 `true`；仅在 `admin_auth_enabled=false` 时生效。设为 `false` 后，未登录访客不能添加宿舍（网页入口和 `POST /api/config` 都要求管理密钥），适合「主页隐藏 + 管理鉴权关闭」仍不希望访客自行添加宿舍的部署。
 - 每个目标的 `feeitemid`、`appId` 必须为正整数，`campus/building/room` 非空且组合不可重复。
 - 目标的 `show_in_web` 可省略，默认 `true`；设为 `false` 后仍会定时/手动采集，但不会出现在公开配置、读数、宿舍页面或 SSE 中。
@@ -218,7 +218,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 ## 安全边界
 
 - 管理密钥存放于数据目录的 `.admin_key`，服务启动时读取；不会写入 `config.json` 或 systemd unit，即使 `admin_auth_enabled=false` 也依然生成。
-- 浏览器把密钥长期保存在 `localStorage`，登录一次后无需重复输入，直到点「退出登录」；启动时会校验一次，失效即刻清除。单宿舍仪表盘和读数保持公开；`show_homepage=false` 时聚合主页、聚合读数和聚合 SSE 需要密钥。
+- 浏览器把密钥长期保存在 `localStorage`，登录一次后无需重复输入，直到点「退出登录」；刷新或重开页面时若密钥仍有效，`show_homepage=false` 的主页也会直接进入聚合视图。启动时会校验一次，失效即刻清除。单宿舍仪表盘和读数保持公开；`show_homepage=false` 时聚合主页、聚合读数和聚合 SSE 需要密钥。
 - 管理 API 使用 `Authorization: Bearer <key>`，也接受 `?key=<key>`。生产部署建议放在 HTTPS 反向代理后；查询参数可能出现在代理访问日志中，应限制日志访问并避免分享含密钥的原始链接。
 - JSON 请求限制为 1 MiB、拒绝未知字段和多余 JSON；配置、token 使用临时文件 + `fsync` + 原子替换保存。
 - 默认安装服务不以 root 运行，数据目录及敏感文件采用受限权限。

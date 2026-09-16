@@ -215,7 +215,7 @@ let state = {
   adminAuthRequired: false,
   showHomepage: true,
   guestAddAllowed: false,   // 未登录能否添加宿舍(服务端派生的 guest_add_allowed)
-  homeUnlocked: false,      // 本次已通过主页验证
+  keyVerified: false,       // 手里的密钥已通过 /api/admin/verify 校验(长效保存,登录一次即可)
   view: null,               // computeViewState() 的结果,唯一视图状态
   tablePage: 1,
   tablePageSize: 10,
@@ -225,10 +225,15 @@ let state = {
 // 配置(show_homepage / guest_add_allowed) × 路径(主页还是宿舍页) × 登录态
 // 推导出唯一的视图状态:显隐、请求条件、SSE 作用域都从这里读,
 // 不再散落 "!state.room && !state.showHomepage" 之类的组合判断。
+function adminVerified() {
+  // 已登录 = 手里有密钥且校验通过。密钥长效保存,因此刷新/重开页面后依然登录。
+  return !!adminKey && state.keyVerified;
+}
+
 function aggregateReadable() {
-  // 聚合数据(全部宿舍)可读的条件:主页公开,或本次已通过验证。
+  // 聚合数据(全部宿舍)可读的条件:主页公开,或已登录。
   // 宿舍页(state.room)读的是单间公开数据,不受主页可见性影响,同样放行。
-  return !!state.room || state.showHomepage || state.homeUnlocked;
+  return !!state.room || state.showHomepage || adminVerified();
 }
 
 function computeViewState() {
@@ -238,8 +243,9 @@ function computeViewState() {
     home,
     aggregate,
     picker: home && !aggregate,      // 主页隐藏且未登录:显示宿舍选择器落地页
-    adminUnlocked: !!adminKey,
-    canAdd: !!adminKey || state.guestAddAllowed,
+    adminUnlocked: adminVerified(),
+    hasKey: !!adminKey,              // 有密钥就允许「退出登录」,即使还没校验通过
+    canAdd: adminVerified() || state.guestAddAllowed,
   };
 }
 
@@ -266,7 +272,7 @@ function applyViewState() {
   document.getElementById("settings-btn").hidden = view.picker;
   document.getElementById("collect-btn").hidden = view.picker;
   if (view.picker) document.getElementById("collect-cancel-btn").hidden = true;
-  document.getElementById("logout-btn").hidden = !view.adminUnlocked;
+  document.getElementById("logout-btn").hidden = !view.hasKey;
   document.getElementById("back-btn").hidden = !(state.room && view.aggregate);
 
   if (view.picker) {
@@ -352,25 +358,25 @@ function readingsURL() {
 
 // 服务端明确以 401 告知「主页已隐藏」时调用:本地状态(可能来自过期缓存)
 // 与服务器不一致,立即切回落地页,不再重复发注定 401 的请求。
-function markHomepageHidden() {
+function markHomepageHidden(keyRejected) {
   if (state.room) return;                          // 宿舍页公开,与主页可见性无关
-  const wasUnlocked = state.homeUnlocked;
+  const wasUnlocked = adminVerified();
   if (!state.showHomepage && !wasUnlocked) return; // 已隐藏且未登录:无需重复处理
   state.showHomepage = false;
-  state.homeUnlocked = false;
+  if (keyRejected) saveStoredKey("");              // 带密钥仍被拒 = 密钥已失效
   applyViewState();   // scopeKey 变化会断开 SSE 并停止轮询兜底
   toast(wasUnlocked ? "登录已失效，请重新登录" : "主页已隐藏，请登录后查看");
 }
 
 async function fetchReadings() {
   const headers = new Headers();
-  if (!state.room && !state.showHomepage && adminKey) {
-    headers.set("Authorization", `Bearer ${adminKey}`);
-  }
+  // 聚合读数的鉴权交给服务器判断:带上密钥即可,不必在这里重复组合开关。
+  const sentKey = !state.room && !!adminKey;
+  if (sentKey) headers.set("Authorization", `Bearer ${adminKey}`);
   const r = await fetch(readingsURL(), { cache: "no-store", headers });
   if (r.status === 401) {
     // 服务器拒绝聚合读数 = 主页对当前请求不可见;纠正本地视图后抛出。
-    markHomepageHidden();
+    markHomepageHidden(sentKey);
     throw new Error("HTTP 401");
   }
   if (!r.ok) throw new Error("HTTP " + r.status);
@@ -385,7 +391,7 @@ async function refreshPublicConfig() {
     q.set("room", state.room.room);
   }
   const headers = new Headers();
-  if (!state.room && state.homeUnlocked && adminKey) {
+  if (!state.room && adminVerified()) {
     headers.set("Authorization", `Bearer ${adminKey}`);
   }
   const suffix = q.toString();
@@ -872,6 +878,7 @@ function loadStoredKey() {
 
 function saveStoredKey(key) {
   adminKey = (key || "").trim();
+  if (!adminKey) state.keyVerified = false;   // 没有密钥就没有"已登录"身份
   try {
     if (adminKey) localStorage.setItem(ADMIN_KEY_STORE, adminKey);
     else localStorage.removeItem(ADMIN_KEY_STORE);
@@ -942,7 +949,7 @@ async function responseJSON(response) {
   return body;
 }
 
-// 校验一个密钥:有效时落盘,无效(401)时清掉已存的密钥;
+// 校验一个密钥:有效时落盘并标记为已登录,无效(401)时清掉已存的密钥;
 // 网络/服务异常原样抛出,避免误清空有效密钥或陷入反复弹窗。
 async function verifyAdminKey(key) {
   const headers = new Headers({ Authorization: `Bearer ${key}` });
@@ -950,6 +957,7 @@ async function verifyAdminKey(key) {
   if (response.status === 401) { saveStoredKey(""); return false; }
   await responseJSON(response);
   saveStoredKey(key);
+  state.keyVerified = true;
   return true;
 }
 
@@ -982,8 +990,7 @@ async function ensureAdminKey() {
 
 async function unlockHomepage() {
   if (aggregateReadable()) return true;
-  if (!await ensureAdminKey()) return false;
-  state.homeUnlocked = true;
+  if (!await ensureAdminKey()) return false;   // 成功即 keyVerified,视图随之切到聚合
   applyViewState();
   // 带密钥重新拉取配置,补齐隐藏主页时不返回的完整宿舍列表。
   try { await refreshPublicConfig(); }
@@ -994,8 +1001,7 @@ async function unlockHomepage() {
 
 function logout() {
   if (!adminKey) return;
-  saveStoredKey("");
-  state.homeUnlocked = false;
+  saveStoredKey("");       // 同时清掉 keyVerified
   homePickerReady = false;
   applyViewState();
   toast("已退出登录");
