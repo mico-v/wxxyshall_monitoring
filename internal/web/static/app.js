@@ -755,16 +755,35 @@ function renderTable() {
   const thead = document.createElement("thead");
   const hr = document.createElement("tr");
   const headers = multi
-    ? ["宿舍", "时间", "剩余电量(kWh)", "总用电量(kWh)", "明细"]
-    : ["时间", "剩余电量(kWh)", "总用电量(kWh)", "明细"];
+    ? ["宿舍", "时间", "剩余电量(kWh)", "总用电量(kWh)", "较上次(kWh)", "平均功率(kW)"]
+    : ["时间", "剩余电量(kWh)", "总用电量(kWh)", "较上次(kWh)", "平均功率(kW)"];
   headers.forEach(h => {
     const th = document.createElement("th");
-    if (h.endsWith("(kWh)")) th.style.textAlign = "right";
+    if (/\(kWh?\)$/.test(h)) th.style.textAlign = "right";
     th.textContent = h;
     hr.appendChild(th);
   });
   thead.appendChild(hr);
   table.appendChild(thead);
+
+  // 逐行计算「本次统计相对上次」的差值(同一宿舍内按时间升序配对,data 为升序):
+  // delta = 剩余电量差(kWh),power = delta / 间隔小时数(kW,即区间平均功率)
+  const deltaByRow = new Map();
+  const prevReading = new Map();
+  for (const d of data) {
+    const key = roomKey(d);
+    const prev = prevReading.get(key);
+    if (prev && prev.surplus !== null && d.surplus_charge !== null &&
+        !isNaN(prev.surplus) && !isNaN(d.surplus_charge)) {
+      const delta = d.surplus_charge - prev.surplus;
+      const hours = (d.epoch - prev.epoch) / 3600;
+      deltaByRow.set(d, {
+        delta,
+        power: (isFinite(hours) && hours > 0) ? delta / hours : null,
+      });
+    }
+    prevReading.set(key, { surplus: d.surplus_charge, epoch: d.epoch });
+  }
 
   const tbody = document.createElement("tbody");
   const newestFirst = data.slice().reverse();
@@ -790,10 +809,24 @@ function renderTable() {
     const tdU = document.createElement("td");
     tdU.className = "num";
     tdU.textContent = fmt(d.total_usage);
+    const info = deltaByRow.get(d);
     const tdD = document.createElement("td");
-    tdD.textContent = Object.entries(d.show || {})
-      .map(([k, v2]) => `${k}=${v2}`).join("  ") || "—";
-    tr.append(tdT, tdS, tdU, tdD);
+    tdD.className = "num";
+    if (info) {
+      tdD.textContent = (info.delta > 0 ? "+" : "") + fmt(info.delta);
+      if (info.delta < 0) tdD.classList.add("neg");
+    } else {
+      tdD.textContent = "—";
+    }
+    const tdP = document.createElement("td");
+    tdP.className = "num";
+    if (info && info.power !== null && !isNaN(info.power)) {
+      tdP.textContent = (info.power > 0 ? "+" : "") + fmt(info.power);
+      if (info.power < 0) tdP.classList.add("neg");
+    } else {
+      tdP.textContent = "—";
+    }
+    tr.append(tdT, tdS, tdU, tdD, tdP);
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
