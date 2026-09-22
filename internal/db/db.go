@@ -438,8 +438,11 @@ func (d *DB) GetLatestReading(campus, building, room string) (*ReadingRow, error
 	return &r, nil
 }
 
-// 由相邻读数推算消耗/充电/功率的 SQL 片段。
-// 约定: 总用电量只在充值时跳升,消耗 = Δ总用电量 - Δ剩余电量。
+// 由相邻读数推算区间消耗/充电的 SQL 片段。
+// 总用电量只在充值时跳升,故 区间消耗 = Δ总用电量 - Δ剩余电量:
+//   - Δ总用电量 = 0(没充值): 消耗 = -Δ剩余电量(剩余减少量)
+//   - Δ总用电量 = R(充值 R): 消耗 = R - Δ剩余电量
+//
 // 间隔 <300s(重启/手动采集)或 >24h(停机缺口)、总用电量回退时置 NULL。
 const (
 	consumptionSQL = `CASE
@@ -452,13 +455,6 @@ const (
 	rechargeSQL = `CASE
 		WHEN prev_total IS NULL OR total_usage IS NULL OR total_usage <= prev_total
 		THEN NULL ELSE total_usage - prev_total END`
-	powerSQL = `CASE
-		WHEN prev_epoch IS NULL OR epoch - prev_epoch < 300 OR epoch - prev_epoch > 86400
-		     OR total_usage IS NULL OR prev_total IS NULL OR total_usage < prev_total
-		     OR surplus_charge IS NULL OR prev_surplus IS NULL
-		THEN NULL
-		ELSE MAX(0.0, (total_usage - prev_total) - (surplus_charge - prev_surplus)) * 3600.0 / (epoch - prev_epoch)
-	END`
 )
 
 // buildReadingFilter 生成 readings 查询的 WHERE 条件与参数。
@@ -513,12 +509,17 @@ func (d *DB) QueryReadings(days int, campus, building, room string) ([]ReadingRo
 			       LAG(epoch) OVER w AS prev_epoch
 			FROM base
 			WINDOW w AS (PARTITION BY campus, building, room ORDER BY epoch, rowid)
+		),
+		calc AS (
+			SELECT *, ` + consumptionSQL + ` AS cons
+			FROM lagged
 		)
 		SELECT ts, epoch, room_label, surplus_charge, total_usage, show_json, campus, building, room,
-		       ` + consumptionSQL + ` AS consumption_kwh,
+		       cons AS consumption_kwh,
 		       ` + rechargeSQL + ` AS recharge_kwh,
-		       ` + powerSQL + ` AS power_kw
-		FROM lagged
+		       CASE WHEN cons IS NULL THEN NULL
+		            ELSE cons * 3600.0 / (epoch - prev_epoch) END AS power_kw
+		FROM calc
 		ORDER BY epoch ASC, rowid ASC`
 
 	rows, err := d.db.Query(query, args...)

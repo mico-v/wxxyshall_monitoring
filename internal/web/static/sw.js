@@ -1,5 +1,5 @@
 const CACHE_PREFIX = 'elec-monitor-';
-const CACHE_NAME = `${CACHE_PREFIX}v14`;
+const CACHE_NAME = `${CACHE_PREFIX}v15`;
 const APP_SHELL = [
   '/',
   '/offline.html',
