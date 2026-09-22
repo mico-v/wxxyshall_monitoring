@@ -238,6 +238,15 @@
   .card .card-hd h2 { font-size: 15px; font-weight: 650; margin: 0; }
   .card .card-hd .hint { font-size: 12px; color: var(--ink-3); }
   .card .card-bd { padding: 12px 18px 16px; min-width: 0; }
+  .view-switch {
+    display: inline-flex; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 9px; overflow: hidden;
+  }
+  .view-switch button {
+    font: inherit; font-size: 12px; color: var(--ink-2);
+    background: transparent; border: 0; padding: 5px 11px; cursor: pointer; white-space: nowrap;
+  }
+  .view-switch button.active { background: var(--series-1); color: #fff; }
   .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .pagination {
     display: flex; align-items: center; justify-content: flex-end; gap: 8px;
@@ -392,10 +401,26 @@
       </div>
     </div>
 
+    <!-- 功率曲线(仅单宿舍) -->
+    <div class="card" id="power-card" hidden>
+      <div class="card-hd">
+        <h2>功率曲线</h2>
+        <span class="hint" id="power-hint">—</span>
+      </div>
+      <div class="card-bd">
+        <div class="chart-holder" id="power-holder"></div>
+      </div>
+    </div>
+
     <!-- 读数明细 -->
     <div class="card" id="detail-card" hidden>
       <div class="card-hd">
-        <h2>读数明细</h2>
+        <h2 id="detail-title">读数明细</h2>
+        <div class="view-switch" id="table-views" role="group" aria-label="表格视图">
+          <button type="button" data-view="raw" class="active">原始读数</button>
+          <button type="button" data-view="daily">每天消耗</button>
+          <button type="button" data-view="recharge">充电记录</button>
+        </div>
         <span class="hint" id="table-hint">—</span>
       </div>
       <div class="card-bd">

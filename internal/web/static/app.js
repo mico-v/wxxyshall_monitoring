@@ -219,6 +219,9 @@ let state = {
   view: null,               // computeViewState() 的结果,唯一视图状态
   tablePage: 1,
   tablePageSize: 10,
+  tableView: "raw",         // 明细卡视图: raw | daily | recharge
+  daily: null,              // 每天消耗(懒加载)
+  recharges: null,          // 充值记录(懒加载)
 };
 
 /* ============ 显示状态机 ============ */
@@ -328,9 +331,15 @@ function pathFor(room) {
   return "/room/" + [room.campus, room.building, room.room]
            .map(encodeURIComponent).join("/");
 }
+function resetTableData() {
+  state.tablePage = 1;
+  state.daily = null;
+  state.recharges = null;
+}
+
 function navigate(room, replace = false) {
   state.room = room;
-  state.tablePage = 1;
+  resetTableData();
   window.scrollTo(0, 0);
   history[replace ? "replaceState" : "pushState"]({ room }, "", pathFor(room));
   applyViewState();   // 切换视图并重连 SSE(作用域变了)
@@ -338,7 +347,7 @@ function navigate(room, replace = false) {
 }
 window.addEventListener("popstate", () => {   // 浏览器前进/后退
   state.room = roomFromPath();
-  state.tablePage = 1;
+  resetTableData();
   window.scrollTo(0, 0);
   applyViewState();
   refresh();
@@ -431,6 +440,8 @@ async function refresh() {
     const data = await fetchReadings();
     if (seq !== refreshSeq) return true;      // 已有更新的刷新,丢弃本次结果
     state.data = data;
+    state.daily = null;                       // 新读数到达后,派生表需重算
+    state.recharges = null;
     render();
     return true;
   } catch (e) {
@@ -453,7 +464,12 @@ function render() {
   renderChart();
   const detailCard = document.getElementById("detail-card");
   if (detailCard) detailCard.hidden = !state.room;
-  if (state.room) renderTable();
+  const powerCard = document.getElementById("power-card");
+  if (powerCard) powerCard.hidden = !state.room;
+  if (state.room) {
+    renderPowerChart();
+    renderTable();
+  }
 
   // 每间宿舍一个独立页面标题
   const roomLabel = state.room && state.groups.length ? state.groups[0].label : "";
@@ -732,9 +748,142 @@ function renderChart() {
   }
 }
 
+// 功率曲线(单宿舍): 区间平均功率, 缺口用 null 断开。
+function buildPowerOption(rows, color) {
+  const t = themeColors();
+  const xState = { last: "" };
+  const pts = rows.map(r => {
+    const ms = new Date(r.ts.replace(" ", "T")).getTime();
+    const v = (r.power_kw === null || r.power_kw === undefined || isNaN(r.power_kw)) ? null : r.power_kw;
+    return [ms, v];
+  });
+  const ys = pts.map(p => p[1]).filter(v => v !== null);
+  const ySpan = ys.length ? Math.max(...ys) - Math.min(...ys) : 0;
+  const yFrac = ySpan < 1 ? 2 : (ySpan < 5 ? 1 : 0);
+  return {
+    animation: false,
+    grid: { top: 16, right: 64, bottom: 24, left: 56 },
+    tooltip: {
+      trigger: "axis", confine: true,
+      backgroundColor: t.surface, borderColor: t.border, borderWidth: 1,
+      textStyle: { color: t.text, fontSize: 12 },
+      formatter: params => {
+        const p = params && params[0];
+        if (!p || p.value == null) return "";
+        const raw = p.value;
+        const ms = Array.isArray(raw) ? raw[0] : p.axisValue;
+        const v = Array.isArray(raw) ? raw[1] : raw;
+        if (v === null || v === undefined || isNaN(v)) return "";
+        const d = new Date(ms);
+        const pad = n => String(n).padStart(2, "0");
+        const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        return `<span style="color:${color}">●</span> ${date}<br>平均功率 <b>${fmt(v)} kW</b>`;
+      },
+    },
+    xAxis: {
+      type: "time",
+      axisLine: { lineStyle: { color: t.axis } },
+      axisTick: { show: false },
+      axisLabel: { color: t.faint, fontSize: 11, hideOverlap: true,
+                   formatter: ms => xAxisFormatter(ms, xState) },
+      splitLine: { show: false },
+    },
+    yAxis: {
+      type: "value", scale: true,
+      axisLabel: {
+        color: t.faint, fontSize: 11,
+        formatter: v => v.toLocaleString("zh-CN",
+          { minimumFractionDigits: yFrac, maximumFractionDigits: yFrac }),
+      },
+      splitLine: { lineStyle: { color: t.grid } },
+    },
+    series: [{
+      type: "line",
+      data: pts,
+      connectNulls: false,
+      smooth: false,
+      showSymbol: pts.length <= 60,
+      symbol: "circle",
+      symbolSize: 5,
+      lineStyle: { width: 2, color },
+      itemStyle: { color },
+      areaStyle: {
+        color: { type: "linear", x: 0, y: 0, x2: 0, y2: 1,
+                 colorStops: [{ offset: 0, color: hexA(color, 0.20) },
+                              { offset: 1, color: hexA(color, 0.02) }] },
+      },
+      endLabel: {
+        show: true, color, fontSize: 12, fontWeight: 600,
+        formatter: p => (p.value && p.value[1] != null && !isNaN(p.value[1]))
+          ? fmt(p.value[1]) + " kW" : "",
+      },
+    }],
+  };
+}
+
+function renderPowerChart() {
+  const holder = document.getElementById("power-holder");
+  if (!holder) return;
+  const hint = document.getElementById("power-hint");
+  holder.textContent = "";
+  const hasData = state.data.some(r => r.power_kw !== null && r.power_kw !== undefined && !isNaN(r.power_kw));
+  if (!hasData || typeof echarts === "undefined") {
+    hint.textContent = "—";
+    holder.innerHTML = `<div class="empty">${typeof echarts === "undefined" ? "图表库加载失败" : "暂无有效功率数据"}</div>`;
+    return;
+  }
+  hint.textContent = "区间平均功率(kW) · 缺口断开";
+  const el = document.createElement("div");
+  el.className = "chart-main";
+  holder.appendChild(el);
+  const ch = echarts.init(el);
+  ch.setOption(buildPowerOption(state.data, roomColorFor(state.data[0])));
+  CHARTS.push(ch);
+}
+
+// 明细卡视图分发: raw(原始读数) | daily(每天消耗) | recharge(充电记录)。
 function renderTable() {
-  const data = state.data;
   const wrap = document.getElementById("table-wrap");
+  if (!wrap) return;
+  const pag = document.querySelector("#detail-card .pagination");
+  if (pag) pag.hidden = state.tableView !== "raw";
+  if (state.tableView === "daily") { renderDailyTable(wrap); return; }
+  if (state.tableView === "recharge") { renderRechargeTable(wrap); return; }
+  renderRawTable(wrap);
+}
+
+function makeTable(wrap, headers) {
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const hr = document.createElement("tr");
+  headers.forEach(h => {
+    const th = document.createElement("th");
+    if (/\(kWh?\)$/.test(h)) th.style.textAlign = "right";
+    th.textContent = h;
+    hr.appendChild(th);
+  });
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  table.appendChild(tbody);
+  wrap.replaceChildren(table);
+  return tbody;
+}
+
+function numCell(value, sign = false) {
+  const td = document.createElement("td");
+  td.className = "num";
+  if (value === null || value === undefined || isNaN(value)) {
+    td.textContent = "—";
+  } else {
+    td.textContent = (sign && value > 0 ? "+" : "") + fmt(value);
+    if (value < 0) td.classList.add("neg");
+  }
+  return td;
+}
+
+function renderRawTable(wrap) {
+  const data = state.data;
   const hint = document.getElementById("table-hint");
   const multi = state.groups.length > 1;
   const pageSize = state.tablePageSize;
@@ -747,45 +896,10 @@ function renderTable() {
   if (prev) prev.disabled = state.tablePage <= 1;
   if (next) next.disabled = state.tablePage >= pageCount || !data.length;
   if (pageInfo) pageInfo.textContent = data.length ? `${state.tablePage} / ${pageCount}` : "0 / 0";
-  if (!data.length) {
-    wrap.innerHTML = '<div class="empty">暂无读数</div>';
-    return;
-  }
-  const table = document.createElement("table");
-  const thead = document.createElement("thead");
-  const hr = document.createElement("tr");
-  const headers = multi
-    ? ["宿舍", "时间", "剩余电量(kWh)", "总用电量(kWh)", "较上次(kWh)", "平均功率(kW)"]
-    : ["时间", "剩余电量(kWh)", "总用电量(kWh)", "较上次(kWh)", "平均功率(kW)"];
-  headers.forEach(h => {
-    const th = document.createElement("th");
-    if (/\(kWh?\)$/.test(h)) th.style.textAlign = "right";
-    th.textContent = h;
-    hr.appendChild(th);
-  });
-  thead.appendChild(hr);
-  table.appendChild(thead);
-
-  // 逐行计算「本次统计相对上次」的差值(同一宿舍内按时间升序配对,data 为升序):
-  // delta = 剩余电量差(kWh),power = delta / 间隔小时数(kW,即区间平均功率)
-  const deltaByRow = new Map();
-  const prevReading = new Map();
-  for (const d of data) {
-    const key = roomKey(d);
-    const prev = prevReading.get(key);
-    if (prev && prev.surplus !== null && d.surplus_charge !== null &&
-        !isNaN(prev.surplus) && !isNaN(d.surplus_charge)) {
-      const delta = d.surplus_charge - prev.surplus;
-      const hours = (d.epoch - prev.epoch) / 3600;
-      deltaByRow.set(d, {
-        delta,
-        power: (isFinite(hours) && hours > 0) ? delta / hours : null,
-      });
-    }
-    prevReading.set(key, { surplus: d.surplus_charge, epoch: d.epoch });
-  }
-
-  const tbody = document.createElement("tbody");
+  if (!data.length) { wrap.innerHTML = '<div class="empty">暂无读数</div>'; return; }
+  const tbody = makeTable(wrap, multi
+    ? ["宿舍", "时间", "剩余电量(kWh)", "总用电量(kWh)", "消耗(kWh)", "平均功率(kW)"]
+    : ["时间", "剩余电量(kWh)", "总用电量(kWh)", "消耗(kWh)", "平均功率(kW)"]);
   const newestFirst = data.slice().reverse();
   const start = (state.tablePage - 1) * pageSize;
   for (const d of newestFirst.slice(start, start + pageSize)) {
@@ -809,28 +923,78 @@ function renderTable() {
     const tdU = document.createElement("td");
     tdU.className = "num";
     tdU.textContent = fmt(d.total_usage);
-    const info = deltaByRow.get(d);
-    const tdD = document.createElement("td");
-    tdD.className = "num";
-    if (info) {
-      tdD.textContent = (info.delta > 0 ? "+" : "") + fmt(info.delta);
-      if (info.delta < 0) tdD.classList.add("neg");
-    } else {
-      tdD.textContent = "—";
-    }
-    const tdP = document.createElement("td");
-    tdP.className = "num";
-    if (info && info.power !== null && !isNaN(info.power)) {
-      tdP.textContent = (info.power > 0 ? "+" : "") + fmt(info.power);
-      if (info.power < 0) tdP.classList.add("neg");
-    } else {
-      tdP.textContent = "—";
-    }
-    tr.append(tdT, tdS, tdU, tdD, tdP);
+    tr.append(tdT, tdS, tdU, numCell(d.consumption_kwh), numCell(d.power_kw));
     tbody.appendChild(tr);
   }
-  table.appendChild(tbody);
-  wrap.replaceChildren(table);
+}
+
+async function renderDailyTable(wrap) {
+  const hint = document.getElementById("table-hint");
+  if (state.daily === null) {
+    hint.textContent = "加载中…";
+    try { state.daily = await fetchDaily(); }
+    catch (e) { hint.textContent = "—"; if (state.tableView === "daily") wrap.innerHTML = '<div class="empty">每天消耗加载失败</div>'; return; }
+    if (state.tableView !== "daily") return;   // 加载期间已切换视图
+  }
+  const rows = state.daily.slice().reverse();   // 新 -> 旧
+  hint.textContent = rows.length ? `${rows.length} 天` : "—";
+  if (!rows.length) { wrap.innerHTML = '<div class="empty">暂无每天消耗数据</div>'; return; }
+  const tbody = makeTable(wrap,
+    ["日期", "消耗电量(kWh)", "充电电量(kWh)", "平均功率(kW)", "日末剩余(kWh)", "采样数"]);
+  for (const d of rows) {
+    const tr = document.createElement("tr");
+    const tdDay = document.createElement("td"); tdDay.textContent = d.day;
+    const tdN = document.createElement("td"); tdN.className = "num"; tdN.textContent = d.samples;
+    tr.append(tdDay, numCell(d.consumption_kwh), numCell(d.recharge_kwh),
+              numCell(d.avg_power_kw), numCell(d.surplus_end), tdN);
+    tbody.appendChild(tr);
+  }
+}
+
+async function renderRechargeTable(wrap) {
+  const hint = document.getElementById("table-hint");
+  if (state.recharges === null) {
+    hint.textContent = "加载中…";
+    try { state.recharges = await fetchRecharges(); }
+    catch (e) { hint.textContent = "—"; if (state.tableView === "recharge") wrap.innerHTML = '<div class="empty">充电记录加载失败</div>'; return; }
+    if (state.tableView !== "recharge") return;
+  }
+  const rows = state.recharges;   // 接口已按时间倒序
+  hint.textContent = rows.length ? `${rows.length} 次` : "—";
+  if (!rows.length) { wrap.innerHTML = '<div class="empty">暂无充电记录</div>'; return; }
+  const tbody = makeTable(wrap,
+    ["时间", "充值电量(kWh)", "充值后剩余(kWh)", "区间消耗(kWh)"]);
+  for (const d of rows) {
+    const tr = document.createElement("tr");
+    const tdT = document.createElement("td"); tdT.textContent = fullTs(d.ts);
+    tr.append(tdT, numCell(d.recharge_kwh), numCell(d.surplus_after), numCell(d.interval_consumption_kwh));
+    tbody.appendChild(tr);
+  }
+}
+
+function roomQuery() {
+  const q = new URLSearchParams();
+  if (state.days) q.set("days", state.days);
+  if (state.room) {
+    q.set("campus", state.room.campus);
+    q.set("building", state.room.building);
+    q.set("room", state.room.room);
+  }
+  return q;
+}
+
+async function fetchDaily() {
+  const r = await fetch("/api/daily?" + roomQuery().toString(), { cache: "no-store" });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  const data = await r.json();
+  return Array.isArray(data) ? data : [];
+}
+
+async function fetchRecharges() {
+  const r = await fetch("/api/recharges?" + roomQuery().toString(), { cache: "no-store" });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  const data = await r.json();
+  return Array.isArray(data) ? data : [];
 }
 
 /* ============ 筛选 ============ */
@@ -840,8 +1004,19 @@ function initFilters() {
       document.querySelectorAll("#filters button[data-days]").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
       state.days = parseInt(btn.dataset.days, 10);
-      state.tablePage = 1;
+      resetTableData();
       refresh();
+    });
+  });
+}
+
+function initTableViews() {
+  document.querySelectorAll("#table-views button[data-view]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      if (state.tableView === btn.dataset.view) return;
+      state.tableView = btn.dataset.view;
+      document.querySelectorAll("#table-views button").forEach(b => b.classList.toggle("active", b === btn));
+      renderTable();
     });
   });
 }
@@ -1528,6 +1703,7 @@ initTheme();
 initFilters();
 initBackButton();
 initTablePagination();
+initTableViews();
 initAdminPrompt();
 initSettings();
 document.getElementById("collect-btn").addEventListener("click", collectNow);

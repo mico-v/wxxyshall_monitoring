@@ -336,6 +336,20 @@ func TestHiddenHomepageRequiresKeyForAggregateDataButKeepsRoomPublic(t *testing.
 	if events.Code != http.StatusUnauthorized {
 		t.Fatalf("aggregate events status = %d, want 401", events.Code)
 	}
+
+	// 新增的聚合端点与 readings 共享可见性策略:聚合需密钥,单宿舍公开。
+	for _, ep := range []string{"/api/daily", "/api/recharges"} {
+		aggregate := httptest.NewRecorder()
+		handler.ServeHTTP(aggregate, httptest.NewRequest(http.MethodGet, ep, nil))
+		if aggregate.Code != http.StatusUnauthorized {
+			t.Fatalf("%s aggregate status = %d, want 401", ep, aggregate.Code)
+		}
+		room := httptest.NewRecorder()
+		handler.ServeHTTP(room, httptest.NewRequest(http.MethodGet, ep+"?campus=A&building=B&room=C", nil))
+		if room.Code != http.StatusOK {
+			t.Fatalf("%s room status = %d body=%s", ep, room.Code, room.Body.String())
+		}
+	}
 }
 
 func TestHiddenTargetExcludedFromPublicConfigAndRoomPage(t *testing.T) {
@@ -717,6 +731,22 @@ func TestWebappContainsReadingPaginationControls(t *testing.T) {
 	}
 }
 
+func TestWebappContainsPowerChartAndTableViewSwitch(t *testing.T) {
+	data, err := readEmbeddedFile("webapp.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(data)
+	for _, required := range []string{
+		`id="power-card"`, `id="power-holder"`,
+		`id="table-views"`, `data-view="raw"`, `data-view="daily"`, `data-view="recharge"`,
+	} {
+		if !strings.Contains(html, required) {
+			t.Errorf("power chart / table view switch UI omitted %s", required)
+		}
+	}
+}
+
 func TestFaviconIsServedAndReferencedByPages(t *testing.T) {
 	server := newTestServer(t)
 	handler := server.Handler()
@@ -1023,7 +1053,7 @@ func TestPWAAssetsAreEmbeddedAndConsistent(t *testing.T) {
 
 	swRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(swRecorder, httptest.NewRequest(http.MethodGet, "/sw.js", nil))
-	if swRecorder.Code != http.StatusOK || !strings.Contains(swRecorder.Body.String(), "`${CACHE_PREFIX}v13`") {
+	if swRecorder.Code != http.StatusOK || !strings.Contains(swRecorder.Body.String(), "`${CACHE_PREFIX}v14`") {
 		t.Fatalf("service worker response invalid: status=%d", swRecorder.Code)
 	}
 	if got := swRecorder.Header().Get("Cache-Control"); got != "no-cache" {

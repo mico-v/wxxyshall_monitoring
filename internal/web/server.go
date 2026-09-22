@@ -131,6 +131,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/events", s.handleSSE)
 	mux.HandleFunc("GET /api/readings", s.limitReadings(s.handleReadings))
+	mux.HandleFunc("GET /api/daily", s.limitReadings(s.handleDailyStats))
+	mux.HandleFunc("GET /api/recharges", s.limitReadings(s.handleRechargeEvents))
 	mux.HandleFunc("GET /api/config", s.handleGetConfig)
 	mux.HandleFunc("POST /api/config", s.requireAdmin(s.handleSaveConfig))
 	mux.HandleFunc("POST /api/collect", s.requireAdmin(s.handleCollect))
@@ -336,37 +338,65 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
+// parseRoomQuery 解析并校验 days 与 campus/building/room 过滤。
+// 返回的 errMsg 非空时应以 400 响应。
+func parseRoomQuery(r *http.Request) (days int, campus, building, room, errMsg string) {
 	q := r.URL.Query()
-	days := 0
 	if d := q.Get("days"); d != "" {
 		parsed, err := strconv.Atoi(d)
 		if err != nil || parsed < 0 || parsed > 36500 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days 必须是 0..36500 的整数"})
-			return
+			return 0, "", "", "", "days 必须是 0..36500 的整数"
 		}
 		days = parsed
 	}
-	campus := q.Get("campus")
-	building := q.Get("building")
-	room := q.Get("room")
+	campus, building, room = q.Get("campus"), q.Get("building"), q.Get("room")
 	if len(campus) > 128 || len(building) > 128 || len(room) > 128 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "campus/building/room 参数过长"})
-		return
+		return 0, "", "", "", "campus/building/room 参数过长"
 	}
-	roomFilters := 0
+	filters := 0
 	for _, value := range []string{campus, building, room} {
 		if value != "" {
-			roomFilters++
+			filters++
 		}
 	}
-	if roomFilters != 0 && roomFilters != 3 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "campus/building/room 必须同时提供"})
+	if filters != 0 && filters != 3 {
+		return 0, "", "", "", "campus/building/room 必须同时提供"
+	}
+	return days, campus, building, room, ""
+}
+
+// requireAggregateAccess 校验聚合(无房间过滤)数据的可见性。
+// 主页隐藏且未登录时以 401 拒绝;返回 false 表示已写出响应。
+func (s *Server) requireAggregateAccess(w http.ResponseWriter, r *http.Request, campus string) bool {
+	if campus != "" {
+		return true
+	}
+	if s.cfgHub.Config().IsHomepageShown() || s.checkAdminKey(r) {
+		return true
+	}
+	w.Header().Set("WWW-Authenticate", `Bearer realm="elec-home"`)
+	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "主页已隐藏，需要管理密钥"})
+	return false
+}
+
+// roomHidden 判断某宿舍是否被配置为不在网页展示。
+func (s *Server) roomHidden(campus, building, room string) bool {
+	key := campus + "|" + building + "|" + room
+	for _, t := range s.cfgHub.Config().GetTargets() {
+		if t.Key() == key && !t.IsShownInWeb() {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
+	days, campus, building, room, errMsg := parseRoomQuery(r)
+	if errMsg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
 		return
 	}
-	if roomFilters == 0 && !s.cfgHub.Config().IsHomepageShown() && !s.checkAdminKey(r) {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="elec-home"`)
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "主页已隐藏，需要管理密钥"})
+	if !s.requireAggregateAccess(w, r, campus) {
 		return
 	}
 
@@ -385,6 +415,9 @@ func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
 		DisplayLabel  string            `json:"display_label"`
 		SurplusCharge *float64          `json:"surplus_charge"`
 		TotalUsage    *float64          `json:"total_usage"`
+		Consumption   *float64          `json:"consumption_kwh"`
+		Recharge      *float64          `json:"recharge_kwh"`
+		Power         *float64          `json:"power_kw"`
 		Show          map[string]string `json:"show"`
 		Campus        string            `json:"campus"`
 		Building      string            `json:"building"`
@@ -422,6 +455,9 @@ func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
 			DisplayLabel:  label,
 			SurplusCharge: row.SurplusCharge,
 			TotalUsage:    row.TotalUsage,
+			Consumption:   row.Consumption,
+			Recharge:      row.Recharge,
+			Power:         row.Power,
 			Show:          row.Show,
 			Campus:        row.Campus,
 			Building:      row.Building,
@@ -430,6 +466,56 @@ func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleDailyStats(w http.ResponseWriter, r *http.Request) {
+	days, campus, building, room, errMsg := parseRoomQuery(r)
+	if errMsg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
+		return
+	}
+	if !s.requireAggregateAccess(w, r, campus) {
+		return
+	}
+	if campus != "" && s.roomHidden(campus, building, room) {
+		writeJSON(w, http.StatusOK, []db.DailyStat{})
+		return
+	}
+	stats, err := s.database.QueryDailyStats(days, campus, building, room)
+	if err != nil {
+		slog.Error("查询每日统计失败", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "查询失败"})
+		return
+	}
+	if stats == nil {
+		stats = []db.DailyStat{}
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *Server) handleRechargeEvents(w http.ResponseWriter, r *http.Request) {
+	days, campus, building, room, errMsg := parseRoomQuery(r)
+	if errMsg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
+		return
+	}
+	if !s.requireAggregateAccess(w, r, campus) {
+		return
+	}
+	if campus != "" && s.roomHidden(campus, building, room) {
+		writeJSON(w, http.StatusOK, []db.RechargeEvent{})
+		return
+	}
+	events, err := s.database.QueryRechargeEvents(days, campus, building, room)
+	if err != nil {
+		slog.Error("查询充值记录失败", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "查询失败"})
+		return
+	}
+	if events == nil {
+		events = []db.RechargeEvent{}
+	}
+	writeJSON(w, http.StatusOK, events)
 }
 
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {

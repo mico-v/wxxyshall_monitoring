@@ -37,6 +37,31 @@ type ReadingRow struct {
 	// 反序列化后的字段
 	Show       map[string]string `json:"show,omitempty"`
 	TotalUsage *float64          `json:"total_usage,omitempty"`
+
+	// 由相邻两条读数用窗口函数推算的派生量:
+	// 消耗 = Δ总用电量 - Δ剩余电量(总用电量只在充值时跳升)
+	Consumption *float64 `json:"consumption_kwh,omitempty"`
+	Recharge    *float64 `json:"recharge_kwh,omitempty"`
+	Power       *float64 `json:"power_kw,omitempty"`
+}
+
+// DailyStat 是按自然日聚合的用电统计(日期取区间结束读数所在日)。
+type DailyStat struct {
+	Day         string   `json:"day"`
+	Consumption float64  `json:"consumption_kwh"`
+	Recharge    float64  `json:"recharge_kwh"`
+	AvgPower    *float64 `json:"avg_power_kw"`
+	Samples     int      `json:"samples"`
+	SurplusEnd  *float64 `json:"surplus_end"`
+}
+
+// RechargeEvent 是一次充值事件(总用电量发生跳升)。
+type RechargeEvent struct {
+	TS           string   `json:"ts"`
+	Epoch        int64    `json:"epoch"`
+	Recharge     float64  `json:"recharge_kwh"`
+	SurplusAfter *float64 `json:"surplus_after"`
+	Consumption  *float64 `json:"interval_consumption_kwh"`
 }
 
 // DB 封装 SQLite 数据库操作。
@@ -133,6 +158,15 @@ func (d *DB) init() error {
 			}
 		}
 	}
+	// total_usage 从 show_json 中提升为独立列,便于窗口/聚合查询。
+	if !cols["total_usage"] {
+		if _, err := d.db.Exec("ALTER TABLE readings ADD COLUMN total_usage REAL"); err != nil {
+			return fmt.Errorf("添加列 total_usage 失败: %w", err)
+		}
+	}
+	if err := d.backfillTotalUsage(); err != nil {
+		return err
+	}
 
 	indexColumns, err := d.indexColumns("idx_readings_room_epoch")
 	if err != nil {
@@ -223,6 +257,82 @@ func (d *DB) tableColumns(table string) (map[string]bool, error) {
 	return cols, nil
 }
 
+// totalUsageFromShow 从 show 字段解析"电表总用电量"。
+func totalUsageFromShow(show map[string]string) *float64 {
+	if show == nil {
+		return nil
+	}
+	raw, ok := show["电表总用电量"]
+	if !ok {
+		return nil
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		return nil
+	}
+	return &f
+}
+
+// backfillTotalUsage 把历史 show_json 中的总用电量回填到 total_usage 列(幂等)。
+func (d *DB) backfillTotalUsage() error {
+	rows, err := d.db.Query(
+		`SELECT rowid, COALESCE(show_json,'') FROM readings WHERE total_usage IS NULL AND show_json IS NOT NULL AND show_json != ''`)
+	if err != nil {
+		return fmt.Errorf("扫描待回填 total_usage 失败: %w", err)
+	}
+	type item struct {
+		rowid int64
+		value float64
+	}
+	var items []item
+	for rows.Next() {
+		var rowid int64
+		var showJSON string
+		if err := rows.Scan(&rowid, &showJSON); err != nil {
+			rows.Close()
+			return fmt.Errorf("读取待回填行失败: %w", err)
+		}
+		var show map[string]string
+		if err := json.Unmarshal([]byte(showJSON), &show); err != nil {
+			continue
+		}
+		if f := totalUsageFromShow(show); f != nil {
+			items = append(items, item{rowid: rowid, value: *f})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("遍历待回填行失败: %w", err)
+	}
+	rows.Close()
+	if len(items) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("开始回填事务失败: %w", err)
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare("UPDATE readings SET total_usage=? WHERE rowid=?")
+	if err != nil {
+		return fmt.Errorf("准备回填语句失败: %w", err)
+	}
+	for _, it := range items {
+		if _, err := stmt.Exec(it.value, it.rowid); err != nil {
+			stmt.Close()
+			return fmt.Errorf("回填 total_usage 失败: %w", err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		return fmt.Errorf("关闭回填语句失败: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交回填事务失败: %w", err)
+	}
+	slog.Info("回填 total_usage 完成", "rows", len(items))
+	return nil
+}
+
 // BackfillRoomIDs 回填旧数据的 campus/building/room 字段。
 func (d *DB) BackfillRoomIDs(cfg *config.Config) error {
 	targets := cfg.GetTargets()
@@ -277,12 +387,13 @@ func (d *DB) InsertReading(t config.Target, reading struct {
 	}
 
 	_, err = d.db.Exec(
-		`INSERT INTO readings (ts, epoch, room_label, surplus_charge, show_json, raw_json, campus, building, room)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO readings (ts, epoch, room_label, surplus_charge, total_usage, show_json, raw_json, campus, building, room)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		now.Format("2006-01-02 15:04:05"),
 		now.Unix(),
 		t.DisplayLabel(),
 		reading.SurplusCharge,
+		totalUsageFromShow(reading.Show),
 		string(showJSON),
 		string(rawJSON),
 		t.Campus, t.Building, t.Room,
@@ -327,17 +438,33 @@ func (d *DB) GetLatestReading(campus, building, room string) (*ReadingRow, error
 	return &r, nil
 }
 
-// QueryReadings 查询读数记录。
-// 最多返回 10000 条记录以防止内存溢出。
-func (d *DB) QueryReadings(days int, campus, building, room string) ([]ReadingRow, error) {
-	query := `SELECT ts, epoch, room_label, surplus_charge, show_json, campus, building, room FROM (
-		SELECT ts, epoch, COALESCE(room_label,'') AS room_label, surplus_charge,
-		       COALESCE(show_json,'') AS show_json, COALESCE(campus,'') AS campus,
-		       COALESCE(building,'') AS building, COALESCE(room,'') AS room, rowid
-		FROM readings`
-	var args []any
-	var conds []string
+// 由相邻读数推算消耗/充电/功率的 SQL 片段。
+// 约定: 总用电量只在充值时跳升,消耗 = Δ总用电量 - Δ剩余电量。
+// 间隔 <300s(重启/手动采集)或 >24h(停机缺口)、总用电量回退时置 NULL。
+const (
+	consumptionSQL = `CASE
+		WHEN prev_epoch IS NULL OR epoch - prev_epoch < 300 OR epoch - prev_epoch > 86400
+		     OR total_usage IS NULL OR prev_total IS NULL OR total_usage < prev_total
+		     OR surplus_charge IS NULL OR prev_surplus IS NULL
+		THEN NULL
+		ELSE MAX(0.0, (total_usage - prev_total) - (surplus_charge - prev_surplus))
+	END`
+	rechargeSQL = `CASE
+		WHEN prev_total IS NULL OR total_usage IS NULL OR total_usage <= prev_total
+		THEN NULL ELSE total_usage - prev_total END`
+	powerSQL = `CASE
+		WHEN prev_epoch IS NULL OR epoch - prev_epoch < 300 OR epoch - prev_epoch > 86400
+		     OR total_usage IS NULL OR prev_total IS NULL OR total_usage < prev_total
+		     OR surplus_charge IS NULL OR prev_surplus IS NULL
+		THEN NULL
+		ELSE MAX(0.0, (total_usage - prev_total) - (surplus_charge - prev_surplus)) * 3600.0 / (epoch - prev_epoch)
+	END`
+)
 
+// buildReadingFilter 生成 readings 查询的 WHERE 条件与参数。
+func buildReadingFilter(days int, campus, building, room string) ([]string, []any, error) {
+	var conds []string
+	var args []any
 	if days > 0 {
 		cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).Unix()
 		conds = append(conds, "epoch >= ?")
@@ -350,19 +477,49 @@ func (d *DB) QueryReadings(days int, campus, building, room string) ([]ReadingRo
 		}
 	}
 	if filters != 0 && filters != 3 {
-		return nil, fmt.Errorf("campus/building/room 必须同时提供")
+		return nil, nil, fmt.Errorf("campus/building/room 必须同时提供")
 	}
 	if filters == 3 {
 		conds = append(conds, "campus = ? AND building = ? AND room = ?")
 		args = append(args, campus, building, room)
 	}
-	if len(conds) > 0 {
-		query += " WHERE " + conds[0]
-		for _, c := range conds[1:] {
-			query += " AND " + c
-		}
+	return conds, args, nil
+}
+
+func whereClause(conds []string) string {
+	if len(conds) == 0 {
+		return ""
 	}
-	query += " ORDER BY epoch DESC, rowid DESC LIMIT 10000) ORDER BY epoch ASC, rowid ASC"
+	return " WHERE " + strings.Join(conds, " AND ")
+}
+
+// QueryReadings 查询读数记录,并附带由相邻读数推算的消耗/充电/功率。
+// 最多返回 10000 条记录以防止内存溢出。
+func (d *DB) QueryReadings(days int, campus, building, room string) ([]ReadingRow, error) {
+	conds, args, err := buildReadingFilter(days, campus, building, room)
+	if err != nil {
+		return nil, err
+	}
+	query := `WITH base AS (
+			SELECT ts, epoch, COALESCE(room_label,'') AS room_label, surplus_charge, total_usage,
+			       COALESCE(show_json,'') AS show_json, COALESCE(campus,'') AS campus,
+			       COALESCE(building,'') AS building, COALESCE(room,'') AS room, rowid
+			FROM readings` + whereClause(conds) + `
+			ORDER BY epoch DESC, rowid DESC LIMIT 10000
+		),
+		lagged AS (
+			SELECT *, LAG(total_usage) OVER w AS prev_total,
+			       LAG(surplus_charge) OVER w AS prev_surplus,
+			       LAG(epoch) OVER w AS prev_epoch
+			FROM base
+			WINDOW w AS (PARTITION BY campus, building, room ORDER BY epoch, rowid)
+		)
+		SELECT ts, epoch, room_label, surplus_charge, total_usage, show_json, campus, building, room,
+		       ` + consumptionSQL + ` AS consumption_kwh,
+		       ` + rechargeSQL + ` AS recharge_kwh,
+		       ` + powerSQL + ` AS power_kw
+		FROM lagged
+		ORDER BY epoch ASC, rowid ASC`
 
 	rows, err := d.db.Query(query, args...)
 	if err != nil {
@@ -374,7 +531,8 @@ func (d *DB) QueryReadings(days int, campus, building, room string) ([]ReadingRo
 	for rows.Next() {
 		var r ReadingRow
 		var showJSON string
-		if err := rows.Scan(&r.TS, &r.Epoch, &r.RoomLabel, &r.SurplusCharge, &showJSON, &r.Campus, &r.Building, &r.Room); err != nil {
+		if err := rows.Scan(&r.TS, &r.Epoch, &r.RoomLabel, &r.SurplusCharge, &r.TotalUsage, &showJSON,
+			&r.Campus, &r.Building, &r.Room, &r.Consumption, &r.Recharge, &r.Power); err != nil {
 			return nil, fmt.Errorf("扫描行失败: %w", err)
 		}
 		if showJSON != "" {
@@ -382,16 +540,114 @@ func (d *DB) QueryReadings(days int, campus, building, room string) ([]ReadingRo
 			if err := json.Unmarshal([]byte(showJSON), &show); err == nil {
 				r.Show = show
 			}
-			if totalStr, ok := r.Show["电表总用电量"]; ok {
-				if f, err := strconv.ParseFloat(strings.TrimSpace(totalStr), 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
-					r.TotalUsage = &f
-				}
-			}
 		}
 		result = append(result, r)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("遍历查询结果失败: %w", err)
+	}
+	return result, nil
+}
+
+// QueryDailyStats 按自然日聚合消耗/充电/平均功率(日期取区间结束读数所在日)。
+func (d *DB) QueryDailyStats(days int, campus, building, room string) ([]DailyStat, error) {
+	conds, args, err := buildReadingFilter(days, campus, building, room)
+	if err != nil {
+		return nil, err
+	}
+	query := `WITH base AS (
+			SELECT ts, epoch, surplus_charge, total_usage, campus, building, room, rowid
+			FROM readings` + whereClause(conds) + `
+			ORDER BY epoch DESC, rowid DESC LIMIT 10000
+		),
+		lagged AS (
+			SELECT substr(ts,1,10) AS day, epoch, surplus_charge, total_usage,
+			       LAG(total_usage) OVER w AS prev_total,
+			       LAG(surplus_charge) OVER w AS prev_surplus,
+			       LAG(epoch) OVER w AS prev_epoch
+			FROM base
+			WINDOW w AS (PARTITION BY campus, building, room ORDER BY epoch, rowid)
+		),
+		iv AS (
+			SELECT day, epoch, prev_epoch, ` + consumptionSQL + ` AS cons, ` + rechargeSQL + ` AS recharge
+			FROM lagged
+		)
+		SELECT day,
+		       COALESCE(SUM(cons), 0) AS consumption,
+		       COALESCE(SUM(recharge), 0) AS recharge,
+		       CASE WHEN SUM(CASE WHEN cons IS NOT NULL THEN epoch - prev_epoch ELSE 0 END) > 0
+		            THEN SUM(cons) * 3600.0 / SUM(CASE WHEN cons IS NOT NULL THEN epoch - prev_epoch ELSE 0 END)
+		            ELSE NULL END AS avg_power,
+		       COUNT(*) AS samples,
+		       (SELECT l3.surplus_charge FROM lagged l3 WHERE l3.day = iv.day
+		        ORDER BY l3.epoch DESC LIMIT 1) AS surplus_end
+		FROM iv
+		GROUP BY day
+		ORDER BY day ASC`
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("查询每日统计失败: %w", err)
+	}
+	defer rows.Close()
+
+	var result []DailyStat
+	for rows.Next() {
+		var st DailyStat
+		if err := rows.Scan(&st.Day, &st.Consumption, &st.Recharge, &st.AvgPower, &st.Samples, &st.SurplusEnd); err != nil {
+			return nil, fmt.Errorf("扫描每日统计失败: %w", err)
+		}
+		result = append(result, st)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历每日统计失败: %w", err)
+	}
+	return result, nil
+}
+
+// QueryRechargeEvents 返回充值事件(总用电量跳升),一次充值一条。
+func (d *DB) QueryRechargeEvents(days int, campus, building, room string) ([]RechargeEvent, error) {
+	conds, args, err := buildReadingFilter(days, campus, building, room)
+	if err != nil {
+		return nil, err
+	}
+	query := `WITH base AS (
+			SELECT ts, epoch, surplus_charge, total_usage, campus, building, room, rowid
+			FROM readings` + whereClause(conds) + `
+			ORDER BY epoch DESC, rowid DESC LIMIT 10000
+		),
+		lagged AS (
+			SELECT ts, epoch, surplus_charge, total_usage,
+			       LAG(total_usage) OVER w AS prev_total,
+			       LAG(surplus_charge) OVER w AS prev_surplus
+			FROM base
+			WINDOW w AS (PARTITION BY campus, building, room ORDER BY epoch, rowid)
+		)
+		SELECT ts, epoch, total_usage - prev_total AS recharge, surplus_charge,
+		       CASE WHEN surplus_charge IS NULL OR prev_surplus IS NULL THEN NULL
+		            ELSE MAX(0.0, (total_usage - prev_total) - (surplus_charge - prev_surplus))
+		       END AS consumption
+		FROM lagged
+		WHERE prev_total IS NOT NULL AND total_usage IS NOT NULL AND total_usage - prev_total > 0.01
+		ORDER BY epoch DESC
+		LIMIT 1000`
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("查询充值记录失败: %w", err)
+	}
+	defer rows.Close()
+
+	var result []RechargeEvent
+	for rows.Next() {
+		var ev RechargeEvent
+		if err := rows.Scan(&ev.TS, &ev.Epoch, &ev.Recharge, &ev.SurplusAfter, &ev.Consumption); err != nil {
+			return nil, fmt.Errorf("扫描充值记录失败: %w", err)
+		}
+		result = append(result, ev)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历充值记录失败: %w", err)
 	}
 	return result, nil
 }
