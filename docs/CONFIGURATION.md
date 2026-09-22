@@ -6,7 +6,7 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
 {
   "username": "学号",
   "port": 5009,
-  "base_url": "https://elec.example.edu.cn",
+  "base_url": "https://wxxyshall.usts.edu.cn",
   "targets": [
     {
       "feeitemid": 409,

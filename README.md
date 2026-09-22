@@ -150,7 +150,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 {
   "username": "学号",
   "port": 5009,
-  "base_url": "https://elec.example.edu.cn",
+  "base_url": "https://wxxyshall.usts.edu.cn",
   "targets": [
     {
       "feeitemid": 409,

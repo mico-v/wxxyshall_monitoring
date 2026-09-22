@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	DefaultBaseURL            = "https://elec.example.edu.cn"
+	DefaultBaseURL            = "https://wxxyshall.usts.edu.cn"
 	DefaultPort               = 5009
 	DefaultPollIntervalMin    = 60
 	DefaultRateLimitPerMinute = 30
