@@ -1,6 +1,6 @@
 # 宿舍电费监控
 
-苏州科技大学宿舍电费余额采集与展示工具。单个 Go 二进制同时提供定时采集、SQLite 历史记录、网页仪表盘、SSE 实时读数和 PWA；`login.py` 负责在本地浏览器中获取 token。
+宿舍电费余额采集与展示工具。单个 Go 二进制同时提供定时采集、SQLite 历史记录、网页仪表盘、SSE 实时读数和 PWA；`login.py` 负责在本地浏览器中获取 token。
 
 服务端正式支持 Linux amd64/arm64；安装器面向 systemd。`login.py` 可在装有 Python、Playwright 和 Chrome/Edge 的桌面系统运行。
 
@@ -150,7 +150,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 {
   "username": "学号",
   "port": 5009,
-  "base_url": "https://wxxyshall.usts.edu.cn",
+  "base_url": "https://elec.example.edu.cn",
   "targets": [
     {
       "feeitemid": 409,
@@ -181,13 +181,13 @@ elec config       # 显示密钥文件位置，不直接打印密钥
   "allow_guest_add_target": true,
   "webhook": {
     "enabled": false,
-    "url": "http://10.57.33.51:9966/send",
+    "url": "http://127.0.0.1:9966/send",
     "token": "",
     "notify_mode": "low_balance",
     "low_balance_threshold": 10,
     "body": {
       "content": "【电费监控】{{label}} 当前余额：{{surplus_charge}}，采集时间：{{ts}}",
-      "umo": "爱丽丝:FriendMessage:2265044253"
+      "umo": "mybot:FriendMessage:1000000"
     }
   }
 }

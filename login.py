@@ -157,7 +157,7 @@ async def main():
         page.on("response", on_response)
 
         print("[*] 打开登录页 ...")
-        base_url = "https://wxxyshall.usts.edu.cn"
+        base_url = "https://elec.example.edu.cn"
         await page.goto(f"{base_url}/plat/login",
                         wait_until="networkidle", timeout=30000)
 

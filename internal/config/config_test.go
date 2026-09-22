@@ -170,7 +170,7 @@ func TestWebhookConfigDefaultsAndValidation(t *testing.T) {
 	cfg, err := parseConfig([]byte(`{
   "username":"u","base_url":"https://example.com","targets":[],
   "poll_interval_minutes":60,"rate_limit_per_minute":30,
-  "webhook":{"enabled":true,"url":"http://10.57.33.51:9966/send","token":"secret","body":{"custom":"value"}}
+  "webhook":{"enabled":true,"url":"http://127.0.0.1:9966/send","token":"secret","body":{"custom":"value"}}
 }`), "test")
 	if err != nil {
 		t.Fatal(err)

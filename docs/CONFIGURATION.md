@@ -6,7 +6,7 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
 {
   "username": "学号",
   "port": 5009,
-  "base_url": "https://wxxyshall.usts.edu.cn",
+  "base_url": "https://elec.example.edu.cn",
   "targets": [
     {
       "feeitemid": 409,
@@ -46,13 +46,13 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
   "allow_guest_add_target": true,
   "webhook": {
     "enabled": false,
-    "url": "http://10.57.33.51:9966/send",
+    "url": "http://127.0.0.1:9966/send",
     "token": "",
     "notify_mode": "low_balance",
     "low_balance_threshold": 10,
     "body": {
       "content": "【电费监控】{{label}} 当前余额：{{surplus_charge}}，采集时间：{{ts}}",
-      "umo": "爱丽丝:FriendMessage:2265044253"
+      "umo": "mybot:FriendMessage:1000000"
     }
   }
 }

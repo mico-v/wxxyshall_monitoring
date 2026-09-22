@@ -1,7 +1,7 @@
 {
     "name": "宿舍电费监控",
     "short_name": "电费监控",
-    "description": "苏州科技大学宿舍电费余额查询与监控",
+    "description": "宿舍电费余额查询与监控",
     "id": "/",
     "start_url": "/",
     "scope": "/",

@@ -42,7 +42,7 @@ func TestSendReadingUsesConfiguredJSONBody(t *testing.T) {
 		LowBalanceThreshold: 10,
 		Body: map[string]any{
 			"content":      "{{label}} {{surplus_charge}} {{low_balance_threshold}} {{ts}}",
-			"umo":          "爱丽丝:FriendMessage:2265044253",
+			"umo":          "mybot:FriendMessage:1000000",
 			"custom_field": "固定值",
 			"nested": map[string]any{
 				"room":  "{{room}}",
@@ -62,7 +62,7 @@ func TestSendReadingUsesConfiguredJSONBody(t *testing.T) {
 	}
 	want := map[string]any{
 		"content":      "我的宿舍 8.50 10.00 2026-08-30 12:34:56",
-		"umo":          "爱丽丝:FriendMessage:2265044253",
+		"umo":          "mybot:FriendMessage:1000000",
 		"custom_field": "固定值",
 		"nested": map[string]any{
 			"room":  "101",
