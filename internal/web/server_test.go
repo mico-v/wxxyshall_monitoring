@@ -338,7 +338,7 @@ func TestHiddenHomepageRequiresKeyForAggregateDataButKeepsRoomPublic(t *testing.
 	}
 
 	// 新增的聚合端点与 readings 共享可见性策略:聚合需密钥,单宿舍公开。
-	for _, ep := range []string{"/api/daily", "/api/recharges"} {
+	for _, ep := range []string{"/api/daily", "/api/recharges", "/api/power"} {
 		aggregate := httptest.NewRecorder()
 		handler.ServeHTTP(aggregate, httptest.NewRequest(http.MethodGet, ep, nil))
 		if aggregate.Code != http.StatusUnauthorized {
@@ -1053,7 +1053,7 @@ func TestPWAAssetsAreEmbeddedAndConsistent(t *testing.T) {
 
 	swRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(swRecorder, httptest.NewRequest(http.MethodGet, "/sw.js", nil))
-	if swRecorder.Code != http.StatusOK || !strings.Contains(swRecorder.Body.String(), "`${CACHE_PREFIX}v15`") {
+	if swRecorder.Code != http.StatusOK || !strings.Contains(swRecorder.Body.String(), "`${CACHE_PREFIX}v16`") {
 		t.Fatalf("service worker response invalid: status=%d", swRecorder.Code)
 	}
 	if got := swRecorder.Header().Get("Cache-Control"); got != "no-cache" {

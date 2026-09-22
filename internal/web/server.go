@@ -133,6 +133,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/readings", s.limitReadings(s.handleReadings))
 	mux.HandleFunc("GET /api/daily", s.limitReadings(s.handleDailyStats))
 	mux.HandleFunc("GET /api/recharges", s.limitReadings(s.handleRechargeEvents))
+	mux.HandleFunc("GET /api/power", s.limitReadings(s.handlePowerSeries))
 	mux.HandleFunc("GET /api/config", s.handleGetConfig)
 	mux.HandleFunc("POST /api/config", s.requireAdmin(s.handleSaveConfig))
 	mux.HandleFunc("POST /api/collect", s.requireAdmin(s.handleCollect))
@@ -516,6 +517,40 @@ func (s *Server) handleRechargeEvents(w http.ResponseWriter, r *http.Request) {
 		events = []db.RechargeEvent{}
 	}
 	writeJSON(w, http.StatusOK, events)
+}
+
+func (s *Server) handlePowerSeries(w http.ResponseWriter, r *http.Request) {
+	days, campus, building, room, errMsg := parseRoomQuery(r)
+	if errMsg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
+		return
+	}
+	if !s.requireAggregateAccess(w, r, campus) {
+		return
+	}
+	bucket := 60
+	if b := r.URL.Query().Get("bucket"); b != "" {
+		parsed, err := strconv.Atoi(b)
+		if err != nil || parsed < 5 || parsed > 1440 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bucket 必须是 5..1440 的整数(分钟)"})
+			return
+		}
+		bucket = parsed
+	}
+	if campus != "" && s.roomHidden(campus, building, room) {
+		writeJSON(w, http.StatusOK, []db.PowerPoint{})
+		return
+	}
+	points, err := s.database.QueryPowerSeries(days, campus, building, room, bucket)
+	if err != nil {
+		slog.Error("查询功率序列失败", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "查询失败"})
+		return
+	}
+	if points == nil {
+		points = []db.PowerPoint{}
+	}
+	writeJSON(w, http.StatusOK, points)
 }
 
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {

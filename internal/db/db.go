@@ -584,6 +584,91 @@ func (d *DB) QueryRechargeEvents(days int, campus, building, room string) ([]Rec
 	return result, nil
 }
 
+// PowerPoint 是重采样后的功率点: 每个时间桶一点, 功率为「至少 bucketMinutes 的滚动窗口」
+// 上的平均功率, 从而避免临近读数的短间隔把成块下降放大成伪尖峰。
+type PowerPoint struct {
+	TS          string   `json:"ts"`
+	Epoch       int64    `json:"epoch"`
+	WindowSecs  *int64   `json:"window_seconds"`
+	Consumption *float64 `json:"consumption_kwh"`
+	Power       *float64 `json:"power_kw"`
+}
+
+// QueryPowerSeries 返回按固定时间桶重采样的功率序列。
+// bucketMinutes 是最小滚动窗口(同时作为分桶宽度, 默认 60, 限制 5..1440)。
+// 每个桶取该桶内最后一条读数作为窗口终点, 起点为其之前至少 bucketMinutes 的最近读数;
+// 这样窗口时长 >= bucketMinutes, 余额的成块跳变会被均摊到足够长的窗口上。
+func (d *DB) QueryPowerSeries(days int, campus, building, room string, bucketMinutes int) ([]PowerPoint, error) {
+	conds, args, err := buildReadingFilter(days, campus, building, room)
+	if err != nil {
+		return nil, err
+	}
+	if bucketMinutes <= 0 {
+		bucketMinutes = 60
+	}
+	if bucketMinutes < 5 {
+		bucketMinutes = 5
+	}
+	if bucketMinutes > 1440 {
+		bucketMinutes = 1440
+	}
+	bucketSecs := int64(bucketMinutes) * 60
+	args = append(args, bucketSecs, bucketSecs)
+
+	query := `WITH base AS (
+			SELECT ts, epoch, surplus_charge, total_usage, campus, building, room, rowid
+			FROM readings` + whereClause(conds) + `
+			ORDER BY epoch DESC, rowid DESC LIMIT 10000
+		),
+		paired AS (
+			SELECT b.rowid, b.ts, b.epoch, b.surplus_charge, b.total_usage, b.campus, b.building, b.room,
+			       (SELECT s.rowid FROM readings s
+			         WHERE s.campus = b.campus AND s.building = b.building AND s.room = b.room
+			           AND s.epoch <= b.epoch - ?
+			         ORDER BY s.epoch DESC, s.rowid DESC LIMIT 1) AS start_rowid
+			FROM base b
+		),
+		calc AS (
+			SELECT p.rowid, p.ts, p.epoch, p.campus, p.building, p.room,
+			       (p.epoch - s.epoch) AS win_secs,
+			       CASE WHEN s.epoch IS NULL OR p.surplus_charge IS NULL OR s.surplus_charge IS NULL
+			                 OR p.total_usage IS NULL OR s.total_usage IS NULL OR p.total_usage < s.total_usage
+			            THEN NULL
+			            ELSE MAX(0.0, (p.total_usage - s.total_usage) - (p.surplus_charge - s.surplus_charge))
+			       END AS cons
+			FROM paired p LEFT JOIN readings s ON s.rowid = p.start_rowid
+		),
+		ranked AS (
+			SELECT *, ROW_NUMBER() OVER (
+			    PARTITION BY campus, building, room, (epoch / ?)
+			    ORDER BY epoch DESC, rowid DESC) AS rn
+			FROM calc
+		)
+		SELECT ts, epoch, win_secs, cons,
+		       CASE WHEN cons IS NULL THEN NULL ELSE cons * 3600.0 / win_secs END AS power_kw
+		FROM ranked WHERE rn = 1
+		ORDER BY epoch ASC`
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("查询功率序列失败: %w", err)
+	}
+	defer rows.Close()
+
+	var result []PowerPoint
+	for rows.Next() {
+		var p PowerPoint
+		if err := rows.Scan(&p.TS, &p.Epoch, &p.WindowSecs, &p.Consumption, &p.Power); err != nil {
+			return nil, fmt.Errorf("扫描功率序列失败: %w", err)
+		}
+		result = append(result, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历功率序列失败: %w", err)
+	}
+	return result, nil
+}
+
 // Close 关闭数据库连接。
 func (d *DB) Close() error {
 	return d.db.Close()

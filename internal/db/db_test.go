@@ -141,6 +141,57 @@ func TestQueryDerivedConsumptionRechargeAndPower(t *testing.T) {
 	}
 }
 
+func TestQueryPowerSeriesResamplesShortIntervals(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	base := int64(1699999200) // 对齐整点, 保证按小时分桶可预测
+	f := func(v float64) *float64 { return &v }
+	samples := []struct {
+		ts      string
+		epoch   int64
+		surplus float64
+		total   *float64
+	}{
+		{"2026-11-14 22:00:00", base, 100, f(0)},
+		{"2026-11-14 23:00:00", base + 3600, 99, f(0)},
+		{"2026-11-14 23:10:00", base + 4200, 97, f(0)}, // 距上条仅 10min, 相邻功率 = 12kW
+		{"2026-11-15 00:10:00", base + 7800, 96, f(0)},
+	}
+	for _, s := range samples {
+		if _, err := database.db.Exec(`INSERT INTO readings
+			(ts, epoch, room_label, surplus_charge, total_usage, show_json, raw_json, campus, building, room)
+			VALUES (?, ?, 'room', ?, ?, '{}', '{}', 'A', 'B', 'C')`,
+			s.ts, s.epoch, s.surplus, s.total); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	points, err := database.QueryPowerSeries(0, "A", "B", "C", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(points) != 3 {
+		t.Fatalf("points = %d, want 3 (one per bucket)", len(points))
+	}
+	if points[0].Power != nil {
+		t.Fatalf("first point power = %v, want nil", *points[0].Power)
+	}
+	// 10min 短间隔被拉长到 70min 窗口: 3kWh/70min ≈ 2.571kW, 而不是 12kW
+	if points[1].WindowSecs == nil || *points[1].WindowSecs != 4200 {
+		t.Fatalf("point1 window = %v, want 4200", points[1].WindowSecs)
+	}
+	if points[1].Power == nil || *points[1].Power < 2.5 || *points[1].Power > 2.6 {
+		t.Fatalf("point1 power = %v, want ~2.57", points[1].Power)
+	}
+	if points[2].Power == nil || *points[2].Power != 1 {
+		t.Fatalf("point2 power = %v, want 1", points[2].Power)
+	}
+}
+
 func TestQueryReadingsRequiresCompleteRoomFilter(t *testing.T) {
 	database, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

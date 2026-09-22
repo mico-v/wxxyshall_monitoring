@@ -222,6 +222,8 @@ let state = {
   tableView: "raw",         // 明细卡视图: raw | daily | recharge
   daily: null,              // 每天消耗(懒加载)
   recharges: null,          // 充值记录(懒加载)
+  power: null,              // 重采样功率序列(懒加载)
+  powerBucketMinutes: 60,   // 功率重采样最小滚动窗口/分桶宽度(分钟)
 };
 
 /* ============ 显示状态机 ============ */
@@ -335,6 +337,7 @@ function resetTableData() {
   state.tablePage = 1;
   state.daily = null;
   state.recharges = null;
+  state.power = null;
 }
 
 function navigate(room, replace = false) {
@@ -440,8 +443,9 @@ async function refresh() {
     const data = await fetchReadings();
     if (seq !== refreshSeq) return true;      // 已有更新的刷新,丢弃本次结果
     state.data = data;
-    state.daily = null;                       // 新读数到达后,派生表需重算
+    state.daily = null;                       // 新读数到达后,派生数据需重算
     state.recharges = null;
+    state.power = null;
     render();
     return true;
   } catch (e) {
@@ -752,6 +756,7 @@ function renderChart() {
 function buildPowerOption(rows, color) {
   const t = themeColors();
   const xState = { last: "" };
+  const byMs = new Map(rows.map(r => [new Date(r.ts.replace(" ", "T")).getTime(), r]));
   const pts = rows.map(r => {
     const ms = new Date(r.ts.replace(" ", "T")).getTime();
     const v = (r.power_kw === null || r.power_kw === undefined || isNaN(r.power_kw)) ? null : r.power_kw;
@@ -777,7 +782,10 @@ function buildPowerOption(rows, color) {
         const d = new Date(ms);
         const pad = n => String(n).padStart(2, "0");
         const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-        return `<span style="color:${color}">●</span> ${date}<br>平均功率 <b>${fmt(v)} kW</b>`;
+        const item = byMs.get(ms);
+        const win = item && item.window_seconds
+          ? `（窗口 ${(item.window_seconds / 3600).toFixed(1)}h）` : "";
+        return `<span style="color:${color}">●</span> ${date}<br>平均功率 <b>${fmt(v)} kW</b>${win}`;
       },
     },
     xAxis: {
@@ -821,23 +829,38 @@ function buildPowerOption(rows, color) {
   };
 }
 
-function renderPowerChart() {
+let powerSeq = 0;
+async function renderPowerChart() {
   const holder = document.getElementById("power-holder");
   if (!holder) return;
   const hint = document.getElementById("power-hint");
+  const seq = ++powerSeq;
+  if (state.power === null) {
+    hint.textContent = "加载中…";
+    try { state.power = await fetchPower(); }
+    catch (e) {
+      if (seq === powerSeq) {
+        hint.textContent = "—";
+        holder.innerHTML = '<div class="empty">功率数据加载失败</div>';
+      }
+      return;
+    }
+    if (seq !== powerSeq) return;   // 加载期间已重渲染
+  }
   holder.textContent = "";
-  const hasData = state.data.some(r => r.power_kw !== null && r.power_kw !== undefined && !isNaN(r.power_kw));
+  const hasData = state.power.some(p => p.power_kw !== null && p.power_kw !== undefined && !isNaN(p.power_kw));
   if (!hasData || typeof echarts === "undefined") {
     hint.textContent = "—";
     holder.innerHTML = `<div class="empty">${typeof echarts === "undefined" ? "图表库加载失败" : "暂无有效功率数据"}</div>`;
     return;
   }
-  hint.textContent = "区间平均功率(kW) · 缺口断开";
+  const mins = state.powerBucketMinutes;
+  hint.textContent = `滚动平均功率(kW) · 窗口≥${mins >= 60 ? (mins / 60) + "h" : mins + "min"}`;
   const el = document.createElement("div");
   el.className = "chart-main";
   holder.appendChild(el);
   const ch = echarts.init(el);
-  ch.setOption(buildPowerOption(state.data, roomColorFor(state.data[0])));
+  ch.setOption(buildPowerOption(state.power, roomColorFor(state.data[0] || state.room)));
   CHARTS.push(ch);
 }
 
@@ -1011,6 +1034,15 @@ async function fetchDaily() {
 
 async function fetchRecharges() {
   const r = await fetch("/api/recharges?" + roomQuery().toString(), { cache: "no-store" });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  const data = await r.json();
+  return Array.isArray(data) ? data : [];
+}
+
+async function fetchPower() {
+  const q = roomQuery();
+  q.set("bucket", String(state.powerBucketMinutes));
+  const r = await fetch("/api/power?" + q.toString(), { cache: "no-store" });
   if (!r.ok) throw new Error("HTTP " + r.status);
   const data = await r.json();
   return Array.isArray(data) ? data : [];
