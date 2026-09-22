@@ -1,7 +1,6 @@
 package db
 
 import (
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -139,30 +138,6 @@ func TestQueryDerivedConsumptionRechargeAndPower(t *testing.T) {
 	}
 	if events[0].Recharge != 10 || events[0].SurplusAfter == nil || *events[0].SurplusAfter != 90 {
 		t.Fatalf("event = %+v, want recharge=10 surplusAfter=90", events[0])
-	}
-}
-
-func TestBackfillTotalUsageFromShowJSON(t *testing.T) {
-	database, err := Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-
-	if _, err := database.db.Exec(`INSERT INTO readings
-		(ts, epoch, room_label, surplus_charge, total_usage, show_json, raw_json, campus, building, room)
-		VALUES ('2026-09-20 10:00:00', 1700000000, 'room', 12, NULL, '{"电表总用电量":"123.45"}', '{}', 'A', 'B', 'C')`); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.backfillTotalUsage(); err != nil {
-		t.Fatal(err)
-	}
-	var got sql.NullFloat64
-	if err := database.db.QueryRow("SELECT total_usage FROM readings LIMIT 1").Scan(&got); err != nil {
-		t.Fatal(err)
-	}
-	if !got.Valid || got.Float64 != 123.45 {
-		t.Fatalf("backfilled total_usage = %+v, want 123.45", got)
 	}
 }
 

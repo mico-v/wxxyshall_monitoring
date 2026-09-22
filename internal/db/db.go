@@ -136,6 +136,7 @@ func (d *DB) init() error {
 			epoch         INTEGER NOT NULL,
 			room_label    TEXT,
 			surplus_charge REAL,
+			total_usage   REAL,
 			show_json     TEXT,
 			raw_json      TEXT,
 			campus        TEXT,
@@ -158,16 +159,6 @@ func (d *DB) init() error {
 			}
 		}
 	}
-	// total_usage 从 show_json 中提升为独立列,便于窗口/聚合查询。
-	if !cols["total_usage"] {
-		if _, err := d.db.Exec("ALTER TABLE readings ADD COLUMN total_usage REAL"); err != nil {
-			return fmt.Errorf("添加列 total_usage 失败: %w", err)
-		}
-	}
-	if err := d.backfillTotalUsage(); err != nil {
-		return err
-	}
-
 	indexColumns, err := d.indexColumns("idx_readings_room_epoch")
 	if err != nil {
 		return err
@@ -271,66 +262,6 @@ func totalUsageFromShow(show map[string]string) *float64 {
 		return nil
 	}
 	return &f
-}
-
-// backfillTotalUsage 把历史 show_json 中的总用电量回填到 total_usage 列(幂等)。
-func (d *DB) backfillTotalUsage() error {
-	rows, err := d.db.Query(
-		`SELECT rowid, COALESCE(show_json,'') FROM readings WHERE total_usage IS NULL AND show_json IS NOT NULL AND show_json != ''`)
-	if err != nil {
-		return fmt.Errorf("扫描待回填 total_usage 失败: %w", err)
-	}
-	type item struct {
-		rowid int64
-		value float64
-	}
-	var items []item
-	for rows.Next() {
-		var rowid int64
-		var showJSON string
-		if err := rows.Scan(&rowid, &showJSON); err != nil {
-			rows.Close()
-			return fmt.Errorf("读取待回填行失败: %w", err)
-		}
-		var show map[string]string
-		if err := json.Unmarshal([]byte(showJSON), &show); err != nil {
-			continue
-		}
-		if f := totalUsageFromShow(show); f != nil {
-			items = append(items, item{rowid: rowid, value: *f})
-		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("遍历待回填行失败: %w", err)
-	}
-	rows.Close()
-	if len(items) == 0 {
-		return nil
-	}
-	tx, err := d.db.Begin()
-	if err != nil {
-		return fmt.Errorf("开始回填事务失败: %w", err)
-	}
-	defer tx.Rollback()
-	stmt, err := tx.Prepare("UPDATE readings SET total_usage=? WHERE rowid=?")
-	if err != nil {
-		return fmt.Errorf("准备回填语句失败: %w", err)
-	}
-	for _, it := range items {
-		if _, err := stmt.Exec(it.value, it.rowid); err != nil {
-			stmt.Close()
-			return fmt.Errorf("回填 total_usage 失败: %w", err)
-		}
-	}
-	if err := stmt.Close(); err != nil {
-		return fmt.Errorf("关闭回填语句失败: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("提交回填事务失败: %w", err)
-	}
-	slog.Info("回填 total_usage 完成", "rows", len(items))
-	return nil
 }
 
 // BackfillRoomIDs 回填旧数据的 campus/building/room 字段。
