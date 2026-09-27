@@ -1179,3 +1179,52 @@ func TestAppVersionSanitizesBuildInput(t *testing.T) {
 		t.Fatalf("blank appVersion = %q, want dev", got)
 	}
 }
+
+func TestAggregateReadingsOnlyIncludeConfiguredRooms(t *testing.T) {
+	server := newTestServer(t)
+	balance := 10.0
+	configured := config.Target{Campus: "A", Building: "B", Room: "C", Label: "one"}
+	removed := config.Target{Campus: "A", Building: "B", Room: "D", Label: "old"}
+	for _, target := range []config.Target{configured, removed} {
+		err := server.database.InsertReading(target, struct {
+			SurplusCharge *float64
+			Show          map[string]string
+			Raw           map[string]any
+		}{SurplusCharge: &balance})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	handler := server.Handler()
+	type roomRow struct {
+		Room string `json:"room"`
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/readings", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("aggregate status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var aggregate []roomRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &aggregate); err != nil {
+		t.Fatal(err)
+	}
+	if len(aggregate) != 1 || aggregate[0].Room != "C" {
+		t.Fatalf("aggregate rooms = %+v, want only configured room C", aggregate)
+	}
+
+	// 单房间查询保留历史房间数据，不改变既有行为。
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/readings?campus=A&building=B&room=D", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("room status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var scoped []roomRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &scoped); err != nil {
+		t.Fatal(err)
+	}
+	if len(scoped) != 1 || scoped[0].Room != "D" {
+		t.Fatalf("room rows = %+v, want historical room D", scoped)
+	}
+}

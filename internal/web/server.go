@@ -440,16 +440,22 @@ func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
 			hidden[t.Key()] = struct{}{}
 		}
 	}
+	// 聚合主页（无宿舍过滤）只展示当前配置的公开宿舍：已从 config 移除的
+	// 历史房间不在配置里，也就没有稳定的排序位置，不应再滞留在主页。
+	aggregate := campus == "" && building == "" && room == ""
 
 	out := make([]outputRow, 0, len(rows))
 	for _, row := range rows {
-		label := row.RoomLabel
 		key := row.Campus + "|" + row.Building + "|" + row.Room
 		if _, ok := hidden[key]; ok {
 			continue
 		}
-		if l, ok := labelMap[key]; ok && l != "" {
-			label = l
+		label, visible := labelMap[key]
+		if aggregate && !visible {
+			continue
+		}
+		if !visible || label == "" {
+			label = row.RoomLabel
 		}
 
 		out = append(out, outputRow{
