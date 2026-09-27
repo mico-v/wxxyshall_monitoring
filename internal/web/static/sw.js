@@ -1,5 +1,7 @@
 const CACHE_PREFIX = 'elec-monitor-';
-const CACHE_NAME = `${CACHE_PREFIX}v17`;
+// 构建时由服务端注入 git 短 hash；版本变化时 CACHE_NAME 随之变化，旧缓存自动失效。
+const CACHE_VERSION = "__ELEC_VERSION__";
+const CACHE_NAME = `${CACHE_PREFIX}${CACHE_VERSION}`;
 const APP_SHELL = [
   '/',
   '/offline.html',

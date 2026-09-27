@@ -4,6 +4,15 @@ if ('serviceWorker' in navigator) {
 }
 "use strict";
 
+/* ============ 构建版本 ============ */
+// 服务端在 webapp.html 注入构建版本（git 短 hash），显示在页脚；
+// SW 缓存名也由同一版本驱动，每次构建自动失效，无需手工改 vNN。
+const APP_VERSION = (document.querySelector('meta[name="app-version"]') || {}).content || "dev";
+function showAppVersion() {
+  const el = document.getElementById("app-version");
+  if (el) el.textContent = APP_VERSION && APP_VERSION !== "dev" ? ` · ${APP_VERSION}` : "";
+}
+
 /* ============ 主题切换(浅/深) ============ */
 const THEME_KEY = "elec-theme";
 function applyTheme(t) {
@@ -42,7 +51,7 @@ function scheduleReadingRefresh() {
   clearTimeout(sseRefreshTimer);
   sseRefreshTimer = setTimeout(() => {
     sseRefreshTimer = null;
-    refresh();
+    refresh({ force: true });   // SSE 表示有新读数，强制绕过高 TTL 取最新值
   }, 300);
 }
 
@@ -178,8 +187,6 @@ function roomColorFor(r) {
   for (let i = 0; i < text.length; i++) hash = (hash * 31 + text.charCodeAt(i)) | 0;
   return PALETTE[Math.abs(hash) % PALETTE.length];
 }
-const esc = s => String(s ?? "").replace(/[&<>"']/g,
-  c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const roomKey = r => [r.campus, r.building, r.room].join("|");
 function targetLabel(t) {
   const label = String(t?.label ?? "").trim();
@@ -201,9 +208,105 @@ function groupByRoom(rows) {
   g.sort((a, b) => {
     const ai = order.has(a.key) ? order.get(a.key) : Number.MAX_SAFE_INTEGER;
     const bi = order.has(b.key) ? order.get(b.key) : Number.MAX_SAFE_INTEGER;
-    return ai - bi || a.label.localeCompare(b.label, "zh");
+    // 未在配置中的宿舍（如已移除的历史房间）用 roomKey 做稳定排序键，
+    // 保证顺序只取决于数据本身，不随 DB 返回顺序或 state.targets 刷新时机变化。
+    return ai - bi || a.key.localeCompare(b.key);
   });
   return g;
+}
+
+/* ============ 客户端数据缓存 ============ */
+// 公开数据接口（无鉴权的 GET）统一通过 dataRequest 取数：
+//   1) 内存 + sessionStorage 双层缓存 + TTL：切换筛选/明细视图时命中缓存，
+//      不再对同一 URL 重复发请求；刷新页面后同标签页也能秒开。
+//   2) 同一 URL 的并发请求合并成一个 Promise（in-flight 去重）。
+//   3) 网络错误 / 429 / 503 时回退到旧缓存，页面不白屏；401/403 例外，
+//      必须交给上层按鉴权结果处理，不能用缓存掩盖。
+const DATA_CACHE_TTL = 60 * 1000;      // 每天消耗 / 充电记录 / 功率：缓存 1 分钟
+const READINGS_CACHE_TTL = 30 * 1000;  // 读数变化较快：缓存 30 秒
+const DATA_CACHE_STORAGE = "elec-data:";
+const DATA_CACHE_MAX_ENTRIES = 60;
+const DATA_CACHE_MAX_BYTES = 200 * 1024;  // 单条过大（如 90 天功率序列）只放内存
+
+const dataCache = new Map();     // url -> { ts, data }
+const dataInflight = new Map();  // url -> Promise
+
+function readStoredData(url) {
+  try {
+    const raw = sessionStorage.getItem(DATA_CACHE_STORAGE + url);
+    if (!raw) return null;
+    const entry = JSON.parse(raw);
+    return entry && typeof entry.ts === "number" ? entry : null;
+  } catch (_) { return null; }
+}
+
+function storeData(url, entry) {
+  dataCache.set(url, entry);
+  try {
+    const serialized = JSON.stringify(entry);
+    if (serialized.length > DATA_CACHE_MAX_BYTES) {
+      sessionStorage.removeItem(DATA_CACHE_STORAGE + url);
+      return;
+    }
+    const keys = [];
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const k = sessionStorage.key(i);
+      if (k && k.startsWith(DATA_CACHE_STORAGE)) keys.push(k);
+    }
+    // 简单容量控制：超出上限时清掉最早写入的若干条。
+    if (keys.length >= DATA_CACHE_MAX_ENTRIES) {
+      keys.slice(0, keys.length - DATA_CACHE_MAX_ENTRIES + 1)
+        .forEach(k => sessionStorage.removeItem(k));
+    }
+    sessionStorage.setItem(DATA_CACHE_STORAGE + url, serialized);
+  } catch (_) { /* 隐私模式 / 配额不足：仅用内存缓存 */ }
+}
+
+function cachedData(url, opts) {
+  if (opts.noStore || !url) return null;
+  const now = Date.now();
+  const ttl = opts.ttl ?? DATA_CACHE_TTL;
+  const mem = dataCache.get(url);
+  if (mem && now - mem.ts < ttl) return mem;
+  const stored = readStoredData(url);
+  if (stored && now - stored.ts < ttl) {
+    dataCache.set(url, stored);
+    return stored;
+  }
+  return null;
+}
+
+function staleData(url, opts) {
+  if (opts.noStore || !url) return null;
+  return dataCache.get(url) || readStoredData(url);
+}
+
+// force=true 跳过缓存读取（仍写缓存），用于 SSE 推送后的主动刷新。
+async function dataRequest(url, fetcher, opts = {}) {
+  const fresh = opts.force ? null : cachedData(url, opts);
+  if (fresh) return fresh.data;
+  if (url && dataInflight.has(url)) return dataInflight.get(url);
+
+  const task = (async () => {
+    try {
+      const data = await fetcher();
+      if (!opts.noStore) storeData(url, { ts: Date.now(), data });
+      return data;
+    } catch (err) {
+      if (err && (err.status === 401 || err.status === 403)) throw err;
+      const stale = staleData(url, opts);
+      if (stale) {
+        console.warn("请求失败，使用缓存数据:", url, err && err.message);
+        return stale.data;
+      }
+      throw err;
+    } finally {
+      if (url) dataInflight.delete(url);
+    }
+  })();
+
+  if (url) dataInflight.set(url, task);
+  return task;
 }
 
 /* ============ 数据获取 ============ */
@@ -381,19 +484,29 @@ function markHomepageHidden(keyRejected) {
   toast(wasUnlocked ? "登录已失效，请重新登录" : "主页已隐藏，请登录后查看");
 }
 
-async function fetchReadings() {
-  const headers = new Headers();
-  // 聚合读数的鉴权交给服务器判断:带上密钥即可,不必在这里重复组合开关。
+async function fetchReadings(opts = {}) {
+  const url = readingsURL();
+  // 带管理密钥的聚合读数可能是受限数据（主页隐藏），不入缓存，避免登出后泄漏。
   const sentKey = !state.room && !!adminKey;
-  if (sentKey) headers.set("Authorization", `Bearer ${adminKey}`);
-  const r = await fetch(readingsURL(), { cache: "no-store", headers });
-  if (r.status === 401) {
-    // 服务器拒绝聚合读数 = 主页对当前请求不可见;纠正本地视图后抛出。
-    markHomepageHidden(sentKey);
-    throw new Error("HTTP 401");
-  }
-  if (!r.ok) throw new Error("HTTP " + r.status);
-  return await r.json();
+  return dataRequest(url, async () => {
+    const headers = new Headers();
+    // 聚合读数的鉴权交给服务器判断:带上密钥即可,不必在这里重复组合开关。
+    if (sentKey) headers.set("Authorization", `Bearer ${adminKey}`);
+    const r = await fetch(url, { cache: "no-store", headers });
+    if (r.status === 401) {
+      // 服务器拒绝聚合读数 = 主页对当前请求不可见;纠正本地视图后抛出。
+      markHomepageHidden(sentKey);
+      const err = new Error("HTTP 401");
+      err.status = 401;
+      throw err;
+    }
+    if (!r.ok) {
+      const err = new Error("HTTP " + r.status);
+      err.status = r.status;
+      throw err;
+    }
+    return await r.json();
+  }, { ttl: READINGS_CACHE_TTL, noStore: sentKey, ...opts });
 }
 
 async function refreshPublicConfig() {
@@ -404,7 +517,9 @@ async function refreshPublicConfig() {
     q.set("room", state.room.room);
   }
   const headers = new Headers();
-  if (!state.room && adminVerified()) {
+  // 只要已登录就带密钥：否则在宿舍页会拿到「只含当前房间」的裁剪配置，
+  // 把 state.targets 覆盖成单项，回到主页时宿舍顺序就变了。
+  if (adminVerified()) {
     headers.set("Authorization", `Bearer ${adminKey}`);
   }
   const suffix = q.toString();
@@ -434,27 +549,25 @@ function startConfigPolling() {
 
 /* 刷新序号:并发刷新时丢弃过期结果,避免旧 fetch 覆盖新数据(钻取/返回快速切换时) */
 let refreshSeq = 0;
-async function refresh() {
+async function refresh(opts = {}) {
   // 主页隐藏且未登录:没有可读的聚合数据,不发注定 401 的请求。
   if (!aggregateReadable()) return true;
   const seq = ++refreshSeq;
-  const dash = document.getElementById("dash");
-  dash.classList.add("refreshing");
   try {
-    const data = await fetchReadings();
+    const data = await fetchReadings(opts);
     if (seq !== refreshSeq) return true;      // 已有更新的刷新,丢弃本次结果
     state.data = data;
-    state.daily = null;                       // 新读数到达后,派生数据需重算
-    state.recharges = null;
-    state.power = null;
+    // 不再在这里清空 daily/recharges/power：它们各自按 TTL 缓存，
+    // 只有切换宿舍/筛选（resetTableData）时才失效，避免每次 SSE 推送都重复查询。
     render();
     return true;
   } catch (e) {
     if (seq !== refreshSeq) return true;
     console.error("读取失败:", e);
+    if (e && (e.status === 429 || e.status === 503)) {
+      toast("服务器繁忙，请稍后再试", true);
+    }
     return false;
-  } finally {
-    if (seq === refreshSeq) dash.classList.remove("refreshing");
   }
 }
 
@@ -474,6 +587,11 @@ function render() {
   if (state.room) {
     renderPowerChart();
     renderTable();
+  } else {
+    disposePowerChart();
+    powerChartKey = "";
+    const powerHolder = document.getElementById("power-holder");
+    if (powerHolder) powerHolder.replaceChildren();
   }
 
   // 每间宿舍一个独立页面标题
@@ -481,10 +599,23 @@ function render() {
   document.title = roomLabel ? `宿舍电费 · ${roomLabel}` : "宿舍电费监控";
 }
 
+function showMessage(holder, text) {
+  let message = holder.firstElementChild;
+  if (!message || !message.classList.contains("empty") || holder.children.length !== 1) {
+    message = document.createElement("div");
+    message.className = "empty";
+    holder.replaceChildren(message);
+  }
+  message.textContent = text;
+  return message;
+}
+
 function renderKpis() {
   const holder = document.getElementById("kpis");
   if (!state.data.length) {
-    holder.innerHTML = '<div class="empty">暂无读数，可点击“立即采集”获取第一条记录</div>';
+    holder.className = "kpis";
+    showMessage(holder, "暂无读数，可点击“立即采集”获取第一条记录");
+    holder.dataset.kpiMode = "empty";
     document.getElementById("room-sub").textContent = "—";
     return;
   }
@@ -492,12 +623,68 @@ function renderKpis() {
   else renderRoomKpis(holder, state.groups);
 }
 
+function setKpiValue(valueEl, value, unit = "") {
+  valueEl.textContent = value;
+  if (unit) {
+    const unitEl = document.createElement("span");
+    unitEl.className = "unit";
+    unitEl.textContent = "\u00a0" + unit;
+    valueEl.appendChild(unitEl);
+  }
+}
+
+function syncKpiStatus(card, status) {
+  let el = card.querySelector(".status");
+  if (!el) {
+    el = document.createElement("div");
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    el.append(dot, document.createTextNode(""));
+    card.appendChild(el);
+  }
+  el.className = status.level ? `status ${status.level}` : "status";
+  el.hidden = !status.level;
+  el.lastChild.nodeValue = status.text || "";
+}
+
+function createKpiCard(label, valueClass = "") {
+  const card = document.createElement("div");
+  card.className = "kpi";
+  const labelEl = document.createElement("div");
+  labelEl.className = "label";
+  labelEl.textContent = label;
+  const valueEl = document.createElement("div");
+  valueEl.className = valueClass ? `value ${valueClass}` : "value";
+  const deltaEl = document.createElement("div");
+  deltaEl.className = "delta flat";
+  card.append(labelEl, valueEl, deltaEl);
+  return { card, labelEl, valueEl, deltaEl };
+}
+
+function ensureSingleKpiCards(holder) {
+  if (holder.dataset.kpiMode !== "single" || holder.children.length !== 4) {
+    holder.replaceChildren();
+    holder.dataset.kpiMode = "single";
+    [
+      createKpiCard("当前剩余电量", "hero"),
+      createKpiCard("电表总用电量"),
+      createKpiCard("采样点数"),
+      createKpiCard("最近更新"),
+    ].forEach(item => holder.appendChild(item.card));
+  }
+  return Array.from(holder.children).map(card => ({
+    card,
+    valueEl: card.querySelector(".value"),
+    deltaEl: card.querySelector(".delta"),
+  }));
+}
+
 function renderSingleKpis(holder, group) {
   holder.className = "kpis";
+  const cards = ensureSingleKpiCards(holder);
   const data = group.rows;
   const last = data[data.length - 1];
-  const room = labelForRow(last);
-  document.getElementById("room-sub").textContent = room;
+  document.getElementById("room-sub").textContent = labelForRow(last);
 
   // 变化量(同一宿舍内相对上一次读数)
   let deltaText = "", deltaClass = "flat";
@@ -512,39 +699,38 @@ function renderSingleKpis(holder, group) {
   }
 
   const st = balanceStatus(last.surplus_charge);
-  const stHtml = st.level
-    ? `<div class="status ${st.level}"><span class="dot"></span>${st.text}</div>`
-    : "";
+  setKpiValue(cards[0].valueEl, fmt(last.surplus_charge), "kWh");
+  cards[0].deltaEl.className = `delta ${deltaClass}`;
+  cards[0].deltaEl.textContent = deltaText;
+  syncKpiStatus(cards[0].card, st);
 
-  holder.innerHTML = `
-    <div class="kpi">
-      <div class="label">当前剩余电量</div>
-      <div class="value hero">${fmt(last.surplus_charge)}<span class="unit">&nbsp;kWh</span></div>
-      <div class="delta ${deltaClass}">${deltaText}</div>
-      ${stHtml}
-    </div>
-    <div class="kpi">
-      <div class="label">电表总用电量</div>
-      <div class="value">${fmt(last.total_usage)}</div>
-      <div class="delta flat">kWh</div>
-    </div>
-    <div class="kpi">
-      <div class="label">采样点数</div>
-      <div class="value">${data.length}</div>
-      <div class="delta flat">当前窗口</div>
-    </div>
-    <div class="kpi">
-      <div class="label">最近更新</div>
-      <div class="value updated">${fullTs(last.ts)}</div>
-      <div class="delta flat"></div>
-    </div>`;
+  setKpiValue(cards[1].valueEl, fmt(last.total_usage));
+  cards[1].deltaEl.className = "delta flat";
+  cards[1].deltaEl.textContent = "kWh";
+
+  setKpiValue(cards[2].valueEl, String(data.length));
+  cards[2].deltaEl.className = "delta flat";
+  cards[2].deltaEl.textContent = "当前窗口";
+
+  setKpiValue(cards[3].valueEl, fullTs(last.ts));
+  cards[3].valueEl.classList.add("updated");
+  cards[3].deltaEl.className = "delta flat";
+  cards[3].deltaEl.textContent = "";
 }
 
 function renderRoomKpis(holder, groups) {
   holder.className = "kpis rooms";
   document.getElementById("room-sub").textContent = `全部宿舍 · ${groups.length} 间`;
-  holder.innerHTML = "";
-  groups.forEach((g, i) => {
+  if (holder.dataset.kpiMode !== "rooms") {
+    holder.replaceChildren();
+    holder.dataset.kpiMode = "rooms";
+  }
+  const cards = new Map();
+  Array.from(holder.children).forEach(card => {
+    if (card.dataset.roomKey) cards.set(card.dataset.roomKey, card);
+  });
+  const seen = new Set();
+  groups.forEach(g => {
     const last = g.rows[g.rows.length - 1];
     let deltaText = "", deltaClass = "flat";
     if (g.rows.length >= 2) {
@@ -557,17 +743,34 @@ function renderRoomKpis(holder, groups) {
       }
     }
     const st = balanceStatus(last.surplus_charge);
-    const card = document.createElement("div");
-    card.className = "kpi room";
+    let card = cards.get(g.key);
+    if (!card) {
+      card = createKpiCard("", "hero").card;
+      card.classList.add("room");
+      const labelEl = card.querySelector(".label");
+      card.addEventListener("click", () => {
+        const current = state.groups.find(item => item.key === card.dataset.roomKey);
+        if (current) focusRoom(current);
+      });
+      cards.set(g.key, card);
+    }
+    card.dataset.roomKey = g.key;
     card.style.setProperty("--accent", roomColorFor(g.rows[0]));
     card.title = "点击放大查看该宿舍曲线";
-    card.addEventListener("click", () => focusRoom(g));
-    card.innerHTML = `
-      <div class="label" title="${esc(g.label)}">${esc(g.label)}</div>
-      <div class="value hero">${fmt(last.surplus_charge)}<span class="unit">&nbsp;kWh</span></div>
-      <div class="delta ${deltaClass}">${deltaText}</div>
-      ${st.level ? `<div class="status ${st.level}"><span class="dot"></span>${st.text}</div>` : ""}`;
+    const labelEl = card.querySelector(".label");
+    labelEl.title = g.label;
+    labelEl.textContent = g.label;
+    const valueEl = card.querySelector(".value");
+    setKpiValue(valueEl, fmt(last.surplus_charge), "kWh");
+    const deltaEl = card.querySelector(".delta");
+    deltaEl.className = `delta ${deltaClass}`;
+    deltaEl.textContent = deltaText;
+    syncKpiStatus(card, st);
     holder.appendChild(card);
+    seen.add(g.key);
+  });
+  Array.from(holder.children).forEach(card => {
+    if (card.dataset.roomKey && !seen.has(card.dataset.roomKey)) card.remove();
   });
 }
 
@@ -602,16 +805,49 @@ function xAxisFormatter(ms, st) {
   return day;
 }
 
-const CHARTS = [];
-function disposeCharts() {
-  CHARTS.forEach(c => { try { if (!c.isDisposed()) c.dispose(); } catch (e) {} });
-  CHARTS.length = 0;
+let chartMode = "";
+let mainChart = null;
+const miniCharts = new Map();
+let powerChart = null;
+let powerChartKey = "";
+
+function disposeChart(chart) {
+  if (!chart) return;
+  try { if (!chart.isDisposed()) chart.dispose(); } catch (e) {}
+}
+function disposeMainChart() {
+  disposeChart(mainChart);
+  mainChart = null;
+}
+function disposeMiniCharts() {
+  miniCharts.forEach(entry => disposeChart(entry.chart));
+  miniCharts.clear();
+}
+function disposeCurveCharts() {
+  disposeMainChart();
+  disposeMiniCharts();
+}
+function disposePowerChart() {
+  disposeChart(powerChart);
+  powerChart = null;
+}
+function chartFor(el) {
+  return echarts.getInstanceByDom(el) || echarts.init(el);
+}
+function activeCharts() {
+  const charts = [];
+  if (mainChart && !mainChart.isDisposed()) charts.push(mainChart);
+  miniCharts.forEach(entry => {
+    if (entry.chart && !entry.chart.isDisposed()) charts.push(entry.chart);
+  });
+  if (powerChart && !powerChart.isDisposed()) charts.push(powerChart);
+  return charts;
 }
 let resizeTimer = null;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
-    CHARTS.forEach(c => { try { if (!c.isDisposed()) c.resize(); } catch (e) {} });
+    activeCharts().forEach(c => { try { c.resize(); } catch (e) {} });
   }, 120);
 });
 
@@ -687,68 +923,109 @@ function buildChartOption(rows, color, mini) {
 function renderChart() {
   const holder = document.getElementById('chart-holder');
   const hint = document.getElementById('chart-hint');
-  disposeCharts();
-  holder.textContent = '';
   if (!state.data.length) {
     hint.textContent = '—';
-    const div = document.createElement('div');
-    div.className = 'empty'; div.textContent = '暂无数据'; holder.appendChild(div);
+    disposeCurveCharts();
+    chartMode = "empty";
+    showMessage(holder, "暂无数据");
     return;
   }
   const groups = state.groups.filter(g =>
     g.rows.some(r => r.surplus_charge !== null && !isNaN(r.surplus_charge)));
   if (!groups.length) {
     hint.textContent = '—';
-    const div = document.createElement('div');
-    div.className = 'empty'; div.textContent = '暂无有效数据'; holder.appendChild(div);
+    disposeCurveCharts();
+    chartMode = "empty";
+    showMessage(holder, "暂无有效数据");
     return;
   }
   if (typeof echarts === "undefined") {
     hint.textContent = "—";
-    const div = document.createElement("div");
-    div.className = "empty"; div.textContent = "图表库加载失败";
-    holder.appendChild(div);
+    disposeCurveCharts();
+    chartMode = "empty";
+    showMessage(holder, "图表库加载失败");
     return;
   }
   if (groups.length === 1) {
-    hint.textContent = '剩余电量曲线(kWh)';
-    const el = document.createElement('div');
-    el.className = 'chart-main'; holder.appendChild(el);
-    const ch = echarts.init(el);
-    ch.setOption(buildChartOption(groups[0].rows, roomColorFor(groups[0].rows[0]), false));
-    CHARTS.push(ch);
+    hint.textContent = "剩余电量曲线(kWh)";
+    if (chartMode !== "single" || !holder.firstElementChild ||
+        !holder.firstElementChild.classList.contains("chart-main")) {
+      disposeCurveCharts();
+      holder.replaceChildren();
+      const el = document.createElement("div");
+      el.className = "chart-main";
+      holder.appendChild(el);
+      chartMode = "single";
+    }
+    const el = holder.firstElementChild;
+    if (!mainChart || mainChart.isDisposed() || mainChart.getDom() !== el) {
+      disposeMainChart();
+      mainChart = chartFor(el);
+    }
+    mainChart.setOption(
+      buildChartOption(groups[0].rows, roomColorFor(groups[0].rows[0]), false), true);
   } else {
-    hint.textContent = '每间宿舍单独一张图 · 点击卡片放大';
-    const grid = document.createElement('div');
-    grid.className = 'mini-grid';
-    const subs = [];
-    groups.forEach((g, i) => {
-      const box = document.createElement('div');
-      box.className = 'mini-card';
-      box.title = '点击放大查看该宿舍曲线';
-      box.addEventListener('click', () => focusRoom(g));
-      const hd = document.createElement('div');
-      hd.className = 'mini-hd';
-      const dot = document.createElement('span');
-      dot.className = 'mini-dot'; dot.style.background = roomColorFor(g.rows[0]);
-      const nm = document.createElement('span');
-      nm.className = 'mini-name'; nm.title = g.label; nm.textContent = g.label;
+    hint.textContent = "每间宿舍单独一张图 · 点击卡片放大";
+    if (chartMode !== "multi" || !holder.firstElementChild ||
+        !holder.firstElementChild.classList.contains("mini-grid")) {
+      disposeCurveCharts();
+      holder.replaceChildren();
+      const grid = document.createElement("div");
+      grid.className = "mini-grid";
+      holder.appendChild(grid);
+      chartMode = "multi";
+    }
+    const grid = holder.firstElementChild;
+    const seen = new Set();
+    groups.forEach(g => {
+      let entry = miniCharts.get(g.key);
+      if (!entry) {
+        const box = document.createElement("div");
+        box.className = "mini-card";
+        box.dataset.roomKey = g.key;
+        box.title = "点击放大查看该宿舍曲线";
+        box.addEventListener("click", () => {
+          const current = state.groups.find(item => item.key === box.dataset.roomKey);
+          if (current) focusRoom(current);
+        });
+        const hd = document.createElement("div");
+        hd.className = "mini-hd";
+        const dot = document.createElement("span");
+        dot.className = "mini-dot";
+        const nm = document.createElement("span");
+        nm.className = "mini-name";
+        const val = document.createElement("span");
+        val.className = "mini-val";
+        hd.append(dot, nm, val);
+        const sub = document.createElement("div");
+        sub.className = "chart-holder sub";
+        box.append(hd, sub);
+        entry = { box, dot, nm, val, sub, chart: null };
+        miniCharts.set(g.key, entry);
+      }
+      entry.dot.style.background = roomColorFor(g.rows[0]);
+      entry.nm.title = g.label;
+      entry.nm.textContent = g.label;
       const last = g.rows[g.rows.length - 1];
-      const val = document.createElement('span');
-      val.className = 'mini-val'; val.textContent = fmt(last.surplus_charge) + ' kWh';
-      hd.append(dot, nm, val);
-      const sub = document.createElement('div');
-      sub.className = 'chart-holder sub';
-      box.append(hd, sub);
-      grid.appendChild(box);
-      subs.push({ sub, rows: g.rows, color: roomColorFor(g.rows[0]) });
+      entry.val.textContent = fmt(last.surplus_charge) + " kWh";
+      grid.appendChild(entry.box);
+      seen.add(g.key);
     });
-    holder.appendChild(grid);
-    // 先挂到文档再初始化 ECharts,否则容器尺寸为 0,canvas 画不出来
-    subs.forEach(({ sub, rows, color }) => {
-      const ch = echarts.init(sub);
-      ch.setOption(buildChartOption(rows, color, true));
-      CHARTS.push(ch);
+    miniCharts.forEach((entry, key) => {
+      if (seen.has(key)) return;
+      disposeChart(entry.chart);
+      entry.box.remove();
+      miniCharts.delete(key);
+    });
+    // 先挂到文档再初始化 ECharts,否则容器尺寸为 0,canvas 画不出来。
+    groups.forEach(g => {
+      const entry = miniCharts.get(g.key);
+      if (!entry.chart || entry.chart.isDisposed() || entry.chart.getDom() !== entry.sub) {
+        disposeChart(entry.chart);
+        entry.chart = chartFor(entry.sub);
+      }
+      entry.chart.setOption(
+        buildChartOption(g.rows, roomColorFor(g.rows[0]), true), true);
     });
   }
 }
@@ -835,6 +1112,12 @@ async function renderPowerChart() {
   const holder = document.getElementById("power-holder");
   if (!holder) return;
   const hint = document.getElementById("power-hint");
+  const nextKey = state.room ? roomKey(state.room) : "";
+  if (powerChartKey !== nextKey) {
+    disposePowerChart();
+    holder.replaceChildren();
+    powerChartKey = nextKey;
+  }
   const seq = ++powerSeq;
   if (state.power === null) {
     hint.textContent = "加载中…";
@@ -842,27 +1125,36 @@ async function renderPowerChart() {
     catch (e) {
       if (seq === powerSeq) {
         hint.textContent = "—";
-        holder.innerHTML = '<div class="empty">功率数据加载失败</div>';
+        disposePowerChart();
+        showMessage(holder, "功率数据加载失败");
       }
       return;
     }
     if (seq !== powerSeq) return;   // 加载期间已重渲染
   }
-  holder.textContent = "";
   const hasData = state.power.some(p => p.power_kw !== null && p.power_kw !== undefined && !isNaN(p.power_kw));
   if (!hasData || typeof echarts === "undefined") {
     hint.textContent = "—";
-    holder.innerHTML = `<div class="empty">${typeof echarts === "undefined" ? "图表库加载失败" : "暂无有效功率数据"}</div>`;
+    disposePowerChart();
+    showMessage(holder, typeof echarts === "undefined" ? "图表库加载失败" : "暂无有效功率数据");
     return;
   }
   const mins = state.powerBucketMinutes;
   hint.textContent = `滚动平均功率(kW) · 窗口≥${mins >= 60 ? (mins / 60) + "h" : mins + "min"}`;
-  const el = document.createElement("div");
-  el.className = "chart-main";
-  holder.appendChild(el);
-  const ch = echarts.init(el);
-  ch.setOption(buildPowerOption(state.power, roomColorFor(state.data[0] || state.room)));
-  CHARTS.push(ch);
+  let el = holder.firstElementChild;
+  if (!el || !el.classList.contains("chart-main")) {
+    disposePowerChart();
+    holder.replaceChildren();
+    el = document.createElement("div");
+    el.className = "chart-main";
+    holder.appendChild(el);
+  }
+  if (!powerChart || powerChart.isDisposed() || powerChart.getDom() !== el) {
+    disposePowerChart();
+    powerChart = chartFor(el);
+  }
+  powerChart.setOption(
+    buildPowerOption(state.power, roomColorFor(state.data[0] || state.room)), true);
 }
 
 // 明细卡视图分发: raw(原始读数) | daily(每天消耗) | recharge(充电记录)。
@@ -875,21 +1167,38 @@ function renderTable() {
 }
 
 function makeTable(wrap, headers) {
-  const table = document.createElement("table");
-  const thead = document.createElement("thead");
-  const hr = document.createElement("tr");
-  headers.forEach(h => {
-    const th = document.createElement("th");
-    if (/\(kWh?\)$/.test(h)) th.style.textAlign = "right";
-    th.textContent = h;
-    hr.appendChild(th);
-  });
-  thead.appendChild(hr);
-  table.appendChild(thead);
-  const tbody = document.createElement("tbody");
-  table.appendChild(tbody);
-  wrap.replaceChildren(table);
-  return tbody;
+  const signature = JSON.stringify(headers);
+  let table = wrap.firstElementChild;
+  if (!table || table.tagName !== "TABLE" || table.dataset.headers !== signature) {
+    table = document.createElement("table");
+    table.dataset.headers = signature;
+    const thead = document.createElement("thead");
+    const hr = document.createElement("tr");
+    headers.forEach(h => {
+      const th = document.createElement("th");
+      if (/\(kWh?\)$/.test(h)) th.style.textAlign = "right";
+      th.textContent = h;
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    const tbody = document.createElement("tbody");
+    table.appendChild(tbody);
+    wrap.replaceChildren(table);
+  }
+  return table.querySelector("tbody");
+}
+
+function emptyTableRow(headers, text) {
+  const tr = document.createElement("tr");
+  const td = document.createElement("td");
+  td.colSpan = headers.length;
+  const message = document.createElement("div");
+  message.className = "empty";
+  message.textContent = text;
+  td.appendChild(message);
+  tr.appendChild(td);
+  return tr;
 }
 
 function numCell(value, sign = false) {
@@ -918,12 +1227,17 @@ function renderPaginatedTable(wrap, headers, rows, opts) {
   if (prev) prev.disabled = state.tablePage <= 1;
   if (next) next.disabled = state.tablePage >= pageCount || !rows.length;
   if (pageInfo) pageInfo.textContent = rows.length ? `${state.tablePage} / ${pageCount}` : "0 / 0";
-  if (!rows.length) { wrap.innerHTML = `<div class="empty">${opts.empty}</div>`; return; }
   const tbody = makeTable(wrap, headers);
-  const start = (state.tablePage - 1) * pageSize;
-  for (const row of rows.slice(start, start + pageSize)) {
-    tbody.appendChild(opts.buildRow(row));
+  if (!rows.length) {
+    tbody.replaceChildren(emptyTableRow(headers, opts.empty));
+    return;
   }
+  const start = (state.tablePage - 1) * pageSize;
+  const fragment = document.createDocumentFragment();
+  for (const row of rows.slice(start, start + pageSize)) {
+    fragment.appendChild(opts.buildRow(row));
+  }
+  tbody.replaceChildren(fragment);
 }
 
 function renderRawTable(wrap) {
@@ -967,7 +1281,7 @@ async function renderDailyTable(wrap) {
     try { state.daily = await fetchDaily(); }
     catch (e) {
       document.getElementById("table-hint").textContent = "—";
-      if (state.tableView === "daily") wrap.innerHTML = '<div class="empty">每天消耗加载失败</div>';
+      if (state.tableView === "daily") showMessage(wrap, "每天消耗加载失败");
       return;
     }
     if (state.tableView !== "daily") return;   // 加载期间已切换视图
@@ -995,7 +1309,7 @@ async function renderRechargeTable(wrap) {
     try { state.recharges = await fetchRecharges(); }
     catch (e) {
       document.getElementById("table-hint").textContent = "—";
-      if (state.tableView === "recharge") wrap.innerHTML = '<div class="empty">充电记录加载失败</div>';
+      if (state.tableView === "recharge") showMessage(wrap, "充电记录加载失败");
       return;
     }
     if (state.tableView !== "recharge") return;
@@ -1026,38 +1340,65 @@ function roomQuery() {
   return q;
 }
 
-async function fetchDaily() {
-  const r = await fetch("/api/daily?" + roomQuery().toString(), { cache: "no-store" });
-  if (!r.ok) throw new Error("HTTP " + r.status);
-  const data = await r.json();
-  return Array.isArray(data) ? data : [];
+async function fetchDaily(opts = {}) {
+  const url = "/api/daily?" + roomQuery().toString();
+  return dataRequest(url, async () => {
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) {
+      const err = new Error("HTTP " + r.status);
+      err.status = r.status;
+      throw err;
+    }
+    const data = await r.json();
+    return Array.isArray(data) ? data : [];
+  }, opts);
 }
 
-async function fetchRecharges() {
-  const r = await fetch("/api/recharges?" + roomQuery().toString(), { cache: "no-store" });
-  if (!r.ok) throw new Error("HTTP " + r.status);
-  const data = await r.json();
-  return Array.isArray(data) ? data : [];
+async function fetchRecharges(opts = {}) {
+  const url = "/api/recharges?" + roomQuery().toString();
+  return dataRequest(url, async () => {
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) {
+      const err = new Error("HTTP " + r.status);
+      err.status = r.status;
+      throw err;
+    }
+    const data = await r.json();
+    return Array.isArray(data) ? data : [];
+  }, opts);
 }
 
-async function fetchPower() {
+async function fetchPower(opts = {}) {
   const q = roomQuery();
   q.set("bucket", String(state.powerBucketMinutes));
-  const r = await fetch("/api/power?" + q.toString(), { cache: "no-store" });
-  if (!r.ok) throw new Error("HTTP " + r.status);
-  const data = await r.json();
-  return Array.isArray(data) ? data : [];
+  const url = "/api/power?" + q.toString();
+  return dataRequest(url, async () => {
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) {
+      const err = new Error("HTTP " + r.status);
+      err.status = r.status;
+      throw err;
+    }
+    const data = await r.json();
+    return Array.isArray(data) ? data : [];
+  }, opts);
 }
 
 /* ============ 筛选 ============ */
 function initFilters() {
+  let filterTimer = null;
   document.querySelectorAll("#filters button[data-days]").forEach(btn => {
     btn.addEventListener("click", () => {
       document.querySelectorAll("#filters button[data-days]").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
       state.days = parseInt(btn.dataset.days, 10);
-      resetTableData();
-      refresh();
+      // 连点筛选时只按最后一次生效，避免瞬间产生多组 readings+power 请求。
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(() => {
+        filterTimer = null;
+        resetTableData();
+        refresh();
+      }, 150);
     });
   });
 }
@@ -1758,6 +2099,7 @@ initTablePagination();
 initTableViews();
 initAdminPrompt();
 initSettings();
+showAppVersion();
 document.getElementById("collect-btn").addEventListener("click", collectNow);
 document.getElementById("home-login-btn").addEventListener("click", () => {
   unlockHomepage().catch(e => toast("登录失败: " + e.message, true));

@@ -32,11 +32,13 @@ import (
 const (
 	maxJSONBody = 1 << 20
 
-	// readingsPerMinuteLimit / readingsBurstLimit: 公开 /api/readings 的每 IP 限流。
-	// 仪表盘的 readings 只在页面加载/钻取时请求（实时更新走 SSE），
-	// 12 次/分钟对正常浏览绰绰有余，同时限制单个攻击 IP 的数据库查询速率。
-	readingsPerMinuteLimit = 30
-	readingsBurstLimit     = 12
+	// readingsPerMinuteLimit / readingsBurstLimit: 公开数据接口（/api/readings、
+	// /api/daily、/api/recharges、/api/power）共用的每 IP 限流。
+	// 一个宿舍页正常浏览＝读数+功率 2 个请求，切筛选再各 1 个；考虑到宿舍区
+	// 多人可能共用同一 NAT 出口 IP，这里给出较宽松的 120 次/分钟、突发 30，
+	// 既避免正常浏览被误伤，又能限制单个 IP 的数据库查询速率。
+	readingsPerMinuteLimit = 120
+	readingsBurstLimit     = 30
 
 	// maxConcurrentReadings: /api/readings 的全局并发上限。
 	// SQLite 连接池只有 3 个连接，突发查询全部涌入会造成羊群效应：大量慢查询
@@ -209,11 +211,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writeHealth(w http.ResponseWriter, healthy bool) {
+	body := map[string]any{"ok": healthy, "database": healthy, "version": appVersion()}
 	if healthy {
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true, "database": true})
+		writeJSON(w, http.StatusOK, body)
 		return
 	}
-	writeJSON(w, http.StatusServiceUnavailable, map[string]bool{"ok": false, "database": false})
+	writeJSON(w, http.StatusServiceUnavailable, body)
 }
 
 // healthTTL 缓存最近一次数据库探活结果，防止公开的 /api/health 被频繁调用时
@@ -1175,6 +1178,7 @@ func (s *Server) serveFile(filename, ctype string) http.HandlerFunc {
 				return
 			}
 		}
+		data = injectVersion(data)
 		w.Header().Set("Content-Type", ctype)
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 		w.Header().Set("Cache-Control", "no-cache")
@@ -1196,6 +1200,7 @@ func (s *Server) serveWebApp(w http.ResponseWriter, homepageShown bool) {
 	if !homepageShown {
 		value = "false"
 	}
+	data = injectVersion(data)
 	data = bytes.Replace(data, []byte(`<body data-show-homepage="true">`), []byte(`<body data-show-homepage="`+value+`">`), 1)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
@@ -1261,7 +1266,10 @@ func (s *Server) requireAdminKey(next http.HandlerFunc) http.HandlerFunc {
 // 正常仪表盘使用（1-3 个并发）永远不会触发 503；超限返回 429/503 与 Retry-After。
 func (s *Server) limitReadings(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.readingsLimiter != nil && !s.readingsLimiter.Allow(clientIP(r)) {
+		ip := clientIP(r)
+		if s.readingsLimiter != nil && !s.readingsLimiter.Allow(ip) {
+			// 命中限流时记录来源与路径，便于事后排查突发/共用出口 IP 的问题。
+			slog.Warn("公开数据接口限流", "ip", ip, "path", r.URL.Path)
 			w.Header().Set("Retry-After", "5")
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "请求过于频繁，请稍后再试"})
 			return

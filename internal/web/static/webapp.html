@@ -10,6 +10,8 @@
 <link rel="preload" href="/static/echarts.min.js" as="script">
 <link rel="preload" href="/static/app.js" as="script">
 <meta name="theme-color" content="#2a78d6">
+<meta name="app-version" content="__ELEC_VERSION__">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <style>
   :root {
@@ -282,11 +284,6 @@
   .neg { color: var(--critical); font-weight: 600; }
   .empty { color: var(--ink-3); text-align: center; padding: 40px 0; font-size: 13px; }
 
-  /* 刷新时保持帧,不闪跳 */
-  #dash.refreshing .kpis,
-  #dash.refreshing .chart-holder,
-  #dash.refreshing table { opacity: 0.55; transition: opacity 0.15s; }
-
   /* ---- 多宿舍:每间一张小图 + 房间 KPI 卡 ---- */
   .kpis.rooms { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
   .kpi.room { border-top: 3px solid var(--accent); }
@@ -462,7 +459,7 @@
 
 <footer class="site-footer">
   项目开源于
-  <a href="https://github.com/mico-v/wxxyshall_monitoring" target="_blank" rel="noopener noreferrer">github.com/mico-v/wxxyshall_monitoring</a>
+  <a href="https://github.com/mico-v/wxxyshall_monitoring" target="_blank" rel="noopener noreferrer">github.com/mico-v/wxxyshall_monitoring</a><span id="app-version"></span>
 </footer>
 
 <div id="toast" role="status" aria-live="polite"></div>

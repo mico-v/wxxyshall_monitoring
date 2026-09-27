@@ -679,6 +679,9 @@ func TestWebappViewStateMachineAndCascadeResetLogic(t *testing.T) {
 		`requestSeq !== buildingRequestSeq`,
 		`requestSeq !== roomRequestSeq`,
 		`navigate({ campus: t.campus, building: t.building, room: t.room, label: t.label })`,
+		// 宿舍顺序必须只取决于数据本身，避免历史房间/裁剪配置导致顺序漂移。
+		`a.key.localeCompare(b.key)`,
+		`meta[name="app-version"]`,
 	} {
 		if !strings.Contains(js, required) {
 			t.Errorf("app.js omitted behavior marker %q", required)
@@ -1053,7 +1056,9 @@ func TestPWAAssetsAreEmbeddedAndConsistent(t *testing.T) {
 
 	swRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(swRecorder, httptest.NewRequest(http.MethodGet, "/sw.js", nil))
-	if swRecorder.Code != http.StatusOK || !strings.Contains(swRecorder.Body.String(), "`${CACHE_PREFIX}v17`") {
+	if swRecorder.Code != http.StatusOK ||
+		!strings.Contains(swRecorder.Body.String(), "const CACHE_VERSION = \"dev\"") ||
+		!strings.Contains(swRecorder.Body.String(), "${CACHE_PREFIX}${CACHE_VERSION}") {
 		t.Fatalf("service worker response invalid: status=%d", swRecorder.Code)
 	}
 	if got := swRecorder.Header().Get("Cache-Control"); got != "no-cache" {
@@ -1092,5 +1097,85 @@ func TestPWAAppShellPrefetchHintsAndNavigationStrategy(t *testing.T) {
 		if !strings.Contains(sw, required) {
 			t.Errorf("sw.js omitted %s", required)
 		}
+	}
+}
+
+func TestWebappUsesIncrementalPWARendering(t *testing.T) {
+	jsData, err := readEmbeddedFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(jsData)
+	for _, required := range []string{
+		`function ensureSingleKpiCards(holder)`,
+		`if (holder.dataset.kpiMode !== "rooms")`,
+		`return echarts.getInstanceByDom(el) || echarts.init(el);`,
+		`mainChart.setOption(`,
+		`entry.chart.setOption(`,
+		`powerChart.setOption(`,
+		`table.dataset.headers !== signature`,
+		`tbody.replaceChildren(fragment)`,
+	} {
+		if !strings.Contains(js, required) {
+			t.Errorf("app.js omitted incremental render marker %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		`dash.classList.add("refreshing")`,
+		`function disposeCharts()`,
+		`holder.innerHTML =`,
+	} {
+		if strings.Contains(js, forbidden) {
+			t.Errorf("app.js still contains full-refresh marker %q", forbidden)
+		}
+	}
+
+	htmlData, err := readEmbeddedFile("webapp.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(htmlData), "#dash.refreshing") {
+		t.Fatal("webapp.html still fades the whole dashboard while refreshing")
+	}
+}
+
+func TestBuildVersionInjection(t *testing.T) {
+	original := Version
+	Version = "abc1234"
+	t.Cleanup(func() { Version = original })
+
+	server := newTestServer(t)
+	handler := server.Handler()
+
+	swRec := httptest.NewRecorder()
+	handler.ServeHTTP(swRec, httptest.NewRequest(http.MethodGet, "/sw.js", nil))
+	if !strings.Contains(swRec.Body.String(), `const CACHE_VERSION = "abc1234";`) {
+		t.Fatalf("sw.js missing injected version: %s", swRec.Body.String())
+	}
+
+	pageRec := httptest.NewRecorder()
+	handler.ServeHTTP(pageRec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if !strings.Contains(pageRec.Body.String(), `name="app-version" content="abc1234"`) {
+		t.Fatal("webapp.html missing injected version meta")
+	}
+
+	healthRec := httptest.NewRecorder()
+	handler.ServeHTTP(healthRec, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	if !strings.Contains(healthRec.Body.String(), `"version":"abc1234"`) {
+		t.Fatalf("health missing version: %s", healthRec.Body.String())
+	}
+}
+
+func TestAppVersionSanitizesBuildInput(t *testing.T) {
+	original := Version
+	t.Cleanup(func() { Version = original })
+
+	Version = `v1.2.3<script>`
+	if got := appVersion(); got != "v1.2.3script" {
+		t.Fatalf("appVersion = %q, want v1.2.3script", got)
+	}
+	Version = "   "
+	if got := appVersion(); got != "dev" {
+		t.Fatalf("blank appVersion = %q, want dev", got)
 	}
 }
