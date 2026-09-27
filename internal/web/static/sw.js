@@ -1,5 +1,5 @@
 const CACHE_PREFIX = 'elec-monitor-';
-const CACHE_NAME = `${CACHE_PREFIX}v16`;
+const CACHE_NAME = `${CACHE_PREFIX}v17`;
 const APP_SHELL = [
   '/',
   '/offline.html',
@@ -50,7 +50,7 @@ self.addEventListener('fetch', event => {
   }
 
   if (request.mode === 'navigate') {
-    event.respondWith(networkFirst(request, '/'));
+    event.respondWith(appShell(event, request));
     return;
   }
 
@@ -66,6 +66,32 @@ async function cacheFirst(request) {
     await cache.put(request, response.clone());
   }
   return response;
+}
+
+// 页面导航优先返回已预缓存的 app shell，并在后台更新 HTML。
+// 这样已安装的 PWA 打开和前进/后退不再等待网络，同时下次启动能拿到新版本。
+async function appShell(event, request) {
+  const cache = await caches.open(CACHE_NAME);
+  const cached = await cache.match(request) || await cache.match('/');
+  const update = fetch(request, { cache: 'no-store' }).then(async response => {
+    if (response.ok) {
+      try { await cache.put('/', response.clone()); } catch (_) {}
+    }
+    return response;
+  });
+
+  if (cached) {
+    event.waitUntil(update.catch(() => undefined));
+    return cached;
+  }
+
+  try {
+    return await update;
+  } catch (err) {
+    const offline = await cache.match('/offline.html');
+    if (offline) return offline;
+    throw err;
+  }
 }
 
 async function networkFirst(request, fallbackUrl, apiRequest = false) {

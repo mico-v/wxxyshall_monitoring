@@ -20,7 +20,8 @@ document.getElementById("theme-btn").addEventListener("click", () => {
   const next = cur === "dark" ? "light" : "dark";
   applyTheme(next);
   localStorage.setItem(THEME_KEY, next);
-  render();   // 重渲图表以适配新主题色
+  renderChart();   // 仅重渲图表以适配新主题色
+  if (state.room) renderPowerChart();
 });
 
 /* ============ SSE 实时推送 ============ */

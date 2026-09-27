@@ -7,6 +7,8 @@
 <link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/static/icon-192.png">
+<link rel="preload" href="/static/echarts.min.js" as="script">
+<link rel="preload" href="/static/app.js" as="script">
 <meta name="theme-color" content="#2a78d6">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <style>
@@ -515,7 +517,8 @@
   </div>
 </div>
 
-<script src="/static/echarts.min.js"></script>
+<script src="/static/theme.js"></script>
+<script src="/static/echarts.min.js" defer></script>
 <script src="/static/app.js" defer></script>
 </body>
 </html>

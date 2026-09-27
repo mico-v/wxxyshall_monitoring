@@ -1053,10 +1053,44 @@ func TestPWAAssetsAreEmbeddedAndConsistent(t *testing.T) {
 
 	swRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(swRecorder, httptest.NewRequest(http.MethodGet, "/sw.js", nil))
-	if swRecorder.Code != http.StatusOK || !strings.Contains(swRecorder.Body.String(), "`${CACHE_PREFIX}v16`") {
+	if swRecorder.Code != http.StatusOK || !strings.Contains(swRecorder.Body.String(), "`${CACHE_PREFIX}v17`") {
 		t.Fatalf("service worker response invalid: status=%d", swRecorder.Code)
 	}
 	if got := swRecorder.Header().Get("Cache-Control"); got != "no-cache" {
 		t.Fatalf("service worker Cache-Control = %q, want no-cache", got)
+	}
+}
+
+func TestPWAAppShellPrefetchHintsAndNavigationStrategy(t *testing.T) {
+	htmlData, err := readEmbeddedFile("webapp.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(htmlData)
+	for _, required := range []string{
+		`<link rel="preload" href="/static/echarts.min.js" as="script">`,
+		`<link rel="preload" href="/static/app.js" as="script">`,
+		`<script src="/static/echarts.min.js" defer></script>`,
+		`<script src="/static/app.js" defer></script>`,
+	} {
+		if !strings.Contains(html, required) {
+			t.Errorf("webapp.html omitted %s", required)
+		}
+	}
+
+	swData, err := readEmbeddedFile("sw.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sw := string(swData)
+	for _, required := range []string{
+		`event.respondWith(appShell(event, request))`,
+		`function appShell(event, request)`,
+		`const cached = await cache.match(request) || await cache.match('/')`,
+		`event.waitUntil(update.catch(() => undefined))`,
+	} {
+		if !strings.Contains(sw, required) {
+			t.Errorf("sw.js omitted %s", required)
+		}
 	}
 }
