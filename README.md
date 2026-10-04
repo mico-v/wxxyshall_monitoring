@@ -65,6 +65,15 @@ export ELEc_DIR="$PWD/.local-elec"
 ./elec run
 ```
 
+`go build` 不需要 Node：前端（React + Vite）的构建产物已提交在 `internal/web/dist/`，会被直接内嵌进二进制。修改前端后需重新构建并提交产物：
+
+```bash
+cd frontend
+pnpm install
+pnpm dev      # 开发服务器，默认把 /api 代理到 127.0.0.1:5009
+pnpm build    # 输出到 ../internal/web/dist
+```
+
 ### Windows 版本
 
 更完整的图文式步骤见 [Windows 安装与使用](docs/WINDOWS.md)，所有配置字段见 [配置文件说明](docs/CONFIGURATION.md)。
@@ -273,6 +282,7 @@ GOCACHE=/tmp/wxxyshall-go-cache go vet ./...
 GOCACHE=/tmp/wxxyshall-go-cache go build ./...
 GOCACHE=/tmp/wxxyshall-go-cache go test -race ./...
 
+(cd frontend && pnpm install --frozen-lockfile && pnpm typecheck && pnpm build)
 node --check internal/web/static/sw.js
 python3 -m py_compile login.py
 ```
@@ -286,6 +296,8 @@ internal/charge/   学校接口客户端及错误处理
 internal/config/   配置/token 原子读写和热重载
 internal/db/       SQLite 历史记录
 internal/rate/     严格请求间隔器
-internal/web/      API、SSE、嵌入式前端和 PWA
+internal/web/      API、SSE、嵌入式前端（dist/）和 PWA
+internal/web/dist/ Vite 构建产物（已提交，勿手改；由 frontend/ 构建生成）
+frontend/          React + Vite + Tailwind 前端源码
 login.py           本地浏览器登录与 token 推送
 ```

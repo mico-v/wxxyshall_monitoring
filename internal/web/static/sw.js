@@ -8,8 +8,6 @@ const APP_SHELL = [
   '/404.html',
   '/manifest.json',
   '/favicon.ico',
-  '/static/echarts.min.js',
-  '/static/app.js',
   '/static/theme.js',
   '/static/icon-192.png',
   '/static/icon-512.png',
@@ -41,7 +39,7 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  if (url.pathname.startsWith('/static/') || url.pathname === '/manifest.json' || url.pathname === '/favicon.ico') {
+  if (url.pathname.startsWith('/static/') || url.pathname.startsWith('/assets/') || url.pathname === '/manifest.json' || url.pathname === '/favicon.ico') {
     event.respondWith(cacheFirst(request));
     return;
   }

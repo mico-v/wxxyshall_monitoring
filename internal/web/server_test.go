@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -307,9 +308,9 @@ func TestHiddenHomepageRequiresKeyForAggregateDataButKeepsRoomPublic(t *testing.
 	if root.Code != http.StatusOK || !strings.Contains(root.Body.String(), `data-show-homepage="false"`) {
 		t.Fatalf("hidden homepage shell status=%d marker=%v", root.Code, strings.Contains(root.Body.String(), `data-show-homepage="false"`))
 	}
-	// 主页隐藏时服务端仍渲染选择器落地页,由 app.js 决定显隐(不再整页隐藏)。
-	if !strings.Contains(root.Body.String(), `id="home-picker"`) {
-		t.Fatal("hidden homepage shell omitted the room picker landing page")
+	// SPA 始终返回同一个 index.html，首屏可见性通过 data-show-homepage 提示前端。
+	if !strings.Contains(root.Body.String(), `<div id="root">`) {
+		t.Fatal("hidden homepage shell omitted the SPA root")
 	}
 
 	aggregate := httptest.NewRecorder()
@@ -628,126 +629,90 @@ func TestConfigAPIAddsTargetAndOnlyUpdatesLabelForDuplicate(t *testing.T) {
 	}
 }
 
-func TestWebappSettingsOnlyExposeDormitoryAddition(t *testing.T) {
-	data, err := readEmbeddedFile("webapp.html")
+func TestSPAIsServedFromEmbeddedDist(t *testing.T) {
+	server := newTestServer(t)
+	handler := server.Handler()
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("SPA index status = %d", recorder.Code)
+	}
+	if ct := recorder.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Fatalf("SPA index Content-Type = %q", ct)
+	}
+	body := recorder.Body.String()
+	for _, required := range []string{`<div id="root">`, `/assets/`, `/static/theme.js`, `data-show-homepage="true"`} {
+		if !strings.Contains(body, required) {
+			t.Errorf("SPA index omitted %s", required)
+		}
+	}
+
+	// 主应用产物应包含项目页脚链接，确认内嵌的是本仓库前端。
+	jsPath := spaAssetPath(body, ".js")
+	if jsPath == "" {
+		t.Fatal("SPA index references no JS asset")
+	}
+	js, err := readDistFile(strings.TrimPrefix(jsPath, "/"))
+	if err != nil {
+		t.Fatalf("read %s: %v", jsPath, err)
+	}
+	if !strings.Contains(string(js), "github.com/mico-v/wxxyshall_monitoring") {
+		t.Error("SPA bundle is missing the project footer link")
+	}
+}
+
+func TestSPAAssetsAreServedWithImmutableCache(t *testing.T) {
+	index, err := readDistFile("index.html")
 	if err != nil {
 		t.Fatal(err)
 	}
-	html := string(data)
-	for _, required := range []string{`id="target-section"`, `id="target-list"`, `id="pick-campus"`, `id="pick-building"`, `id="pick-room"`, `id="pick-add"`} {
-		if !strings.Contains(html, required) {
-			t.Errorf("settings UI omitted %s", required)
-		}
+	assets := spaAssetPaths(string(index))
+	if len(assets) == 0 {
+		t.Fatal("built index.html references no assets")
 	}
-	for _, forbidden := range []string{
-		`id="cfg-username"`, `id="cfg-port"`, `id="cfg-base-url"`, `id="cfg-poll"`, `id="cfg-rate"`,
-		`id="pick-feeitemid"`, `id="pick-appid"`, `id="settings-save"`, `className = "target-actions"`,
-	} {
-		if strings.Contains(html, forbidden) {
-			t.Errorf("settings UI still exposes %s", forbidden)
+	server := newTestServer(t)
+	handler := server.Handler()
+	for _, asset := range assets {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, asset, nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status = %d", asset, recorder.Code)
+		}
+		if got := recorder.Header().Get("Cache-Control"); !strings.Contains(got, "immutable") {
+			t.Errorf("%s Cache-Control = %q", asset, got)
+		}
+		if recorder.Body.Len() == 0 {
+			t.Errorf("%s is empty", asset)
 		}
 	}
 }
 
-func TestWebappViewStateMachineAndCascadeResetLogic(t *testing.T) {
-	data, err := readEmbeddedFile("app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	js := string(data)
-	for _, required := range []string{
-		`function adminVerified()`,
-		`function aggregateReadable()`,
-		`function computeViewState()`,
-		`function applyViewState()`,
-		`function syncHomePicker(`,
-		// 已保存的密钥校验通过即视为已登录,主页直接进入聚合视图(不必再点登录)。
-		`state.keyVerified = true`,
-		`cfg.show_homepage !== false`,
-		`cfg.guest_add_allowed === true`,
-		`localStorage.setItem(ADMIN_KEY_STORE, adminKey)`,
-		`localStorage.removeItem(ADMIN_KEY_STORE)`,
-		`function logout()`,
-		`function lookupPickedTarget()`,
-		`target_exists`,
-		`target_hidden`,
-		`宿舍已存在`,
-		`show_in_web = true`,
-		`document.getElementById("target-section").hidden = !showTargets`,
-		`fillSelect(selB, [], "— 选择楼栋 —", true)`,
-		`fillSelect(selR, [], "— 选择房间 —", true)`,
-		`requestSeq !== buildingRequestSeq`,
-		`requestSeq !== roomRequestSeq`,
-		`navigate({ campus: t.campus, building: t.building, room: t.room, label: t.label })`,
-		// 宿舍顺序必须只取决于数据本身，避免历史房间/裁剪配置导致顺序漂移。
-		`a.key.localeCompare(b.key)`,
-		`meta[name="app-version"]`,
-	} {
-		if !strings.Contains(js, required) {
-			t.Errorf("app.js omitted behavior marker %q", required)
-		}
-	}
-	// 启动时不得再用弹窗挡住整页(旧 homepage-unlocked 协议已移除)。
-	// data-show-homepage 只作为首屏提示读取,不再参与显隐逻辑。
-	for _, forbidden := range []string{`homepageUnlocked`, `homepage-unlocked`} {
-		if strings.Contains(js, forbidden) {
-			t.Errorf("app.js still contains legacy marker %q", forbidden)
-		}
+func TestSPAAssetPathTraversalIsRejected(t *testing.T) {
+	server := newTestServer(t)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(
+		recorder,
+		httptest.NewRequest(http.MethodGet, "/assets/..%2Fdist%2Findex.html", nil),
+	)
+	if recorder.Code == http.StatusOK {
+		t.Fatal("path traversal into dist unexpectedly succeeded")
 	}
 }
 
-func TestWebappHomePickerFallbackMarkup(t *testing.T) {
-	data, err := readEmbeddedFile("webapp.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(data)
-	for _, required := range []string{
-		`id="home-picker"`,
-		`id="home-picker-mount"`,
-		`id="settings-picker-mount"`,
-		`id="picker-block"`,
-		`id="home-login-btn"`,
-		`id="logout-btn"`,
-		// 整页隐藏会只剩页脚顶到最上方,不能再有 app-shell 级别的隐藏规则。
-	} {
-		if !strings.Contains(html, required) {
-			t.Errorf("webapp.html omitted %s", required)
-		}
-	}
-	if strings.Contains(html, `#app-shell { display: none`) ||
-		strings.Contains(html, `data-show-homepage="false"] #app-shell`) {
-		t.Error("webapp.html must not hide the whole app shell when the homepage is hidden")
-	}
+var spaAssetRe = regexp.MustCompile(`/assets/[A-Za-z0-9._-]+`)
+
+func spaAssetPaths(html string) []string {
+	return spaAssetRe.FindAllString(html, -1)
 }
 
-func TestWebappContainsReadingPaginationControls(t *testing.T) {
-	data, err := readEmbeddedFile("webapp.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(data)
-	for _, required := range []string{`id="table-page-size"`, `value="10"`, `id="table-prev"`, `id="table-next"`} {
-		if !strings.Contains(html, required) {
-			t.Errorf("pagination UI omitted %s", required)
+func spaAssetPath(html, ext string) string {
+	for _, asset := range spaAssetPaths(html) {
+		if strings.HasSuffix(asset, ext) {
+			return asset
 		}
 	}
-}
-
-func TestWebappContainsPowerChartAndTableViewSwitch(t *testing.T) {
-	data, err := readEmbeddedFile("webapp.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(data)
-	for _, required := range []string{
-		`id="power-card"`, `id="power-holder"`,
-		`id="table-views"`, `data-view="raw"`, `data-view="daily"`, `data-view="recharge"`,
-	} {
-		if !strings.Contains(html, required) {
-			t.Errorf("power chart / table view switch UI omitted %s", required)
-		}
-	}
+	return ""
 }
 
 func TestFaviconIsServedAndReferencedByPages(t *testing.T) {
@@ -763,7 +728,7 @@ func TestFaviconIsServedAndReferencedByPages(t *testing.T) {
 		t.Fatal("favicon response is not an ICO file")
 	}
 
-	for _, page := range []string{"webapp.html", "404.html", "offline.html"} {
+	for _, page := range []string{"404.html", "offline.html"} {
 		data, err := readEmbeddedFile(page)
 		if err != nil {
 			t.Fatal(err)
@@ -772,11 +737,18 @@ func TestFaviconIsServedAndReferencedByPages(t *testing.T) {
 			t.Fatalf("%s does not reference /favicon.ico", page)
 		}
 	}
+	index, err := readDistFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(index), `<link rel="icon" href="/favicon.ico"`) {
+		t.Fatal("SPA index does not reference /favicon.ico")
+	}
 }
 
 func TestPagesContainProjectFooter(t *testing.T) {
 	const projectURL = "https://github.com/mico-v/wxxyshall_monitoring"
-	for _, page := range []string{"webapp.html", "404.html", "offline.html"} {
+	for _, page := range []string{"404.html", "offline.html"} {
 		data, err := readEmbeddedFile(page)
 		if err != nil {
 			t.Fatal(err)
@@ -1066,20 +1038,19 @@ func TestPWAAssetsAreEmbeddedAndConsistent(t *testing.T) {
 	}
 }
 
-func TestPWAAppShellPrefetchHintsAndNavigationStrategy(t *testing.T) {
-	htmlData, err := readEmbeddedFile("webapp.html")
+func TestPWAAppShellAssetsAndNavigationStrategy(t *testing.T) {
+	index, err := readDistFile("index.html")
 	if err != nil {
 		t.Fatal(err)
 	}
-	html := string(htmlData)
+	html := string(index)
 	for _, required := range []string{
-		`<link rel="preload" href="/static/echarts.min.js" as="script">`,
-		`<link rel="preload" href="/static/app.js" as="script">`,
-		`<script src="/static/echarts.min.js" defer></script>`,
-		`<script src="/static/app.js" defer></script>`,
+		`<script type="module"`,
+		`/assets/`,
+		`<script src="/static/theme.js"></script>`,
 	} {
 		if !strings.Contains(html, required) {
-			t.Errorf("webapp.html omitted %s", required)
+			t.Errorf("SPA index omitted %s", required)
 		}
 	}
 
@@ -1093,49 +1064,11 @@ func TestPWAAppShellPrefetchHintsAndNavigationStrategy(t *testing.T) {
 		`function appShell(event, request)`,
 		`const cached = await cache.match(request) || await cache.match('/')`,
 		`event.waitUntil(update.catch(() => undefined))`,
+		`url.pathname.startsWith('/assets/')`,
 	} {
 		if !strings.Contains(sw, required) {
 			t.Errorf("sw.js omitted %s", required)
 		}
-	}
-}
-
-func TestWebappUsesIncrementalPWARendering(t *testing.T) {
-	jsData, err := readEmbeddedFile("app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	js := string(jsData)
-	for _, required := range []string{
-		`function ensureSingleKpiCards(holder)`,
-		`if (holder.dataset.kpiMode !== "rooms")`,
-		`return echarts.getInstanceByDom(el) || echarts.init(el);`,
-		`mainChart.setOption(`,
-		`entry.chart.setOption(`,
-		`powerChart.setOption(`,
-		`table.dataset.headers !== signature`,
-		`tbody.replaceChildren(fragment)`,
-	} {
-		if !strings.Contains(js, required) {
-			t.Errorf("app.js omitted incremental render marker %q", required)
-		}
-	}
-	for _, forbidden := range []string{
-		`dash.classList.add("refreshing")`,
-		`function disposeCharts()`,
-		`holder.innerHTML =`,
-	} {
-		if strings.Contains(js, forbidden) {
-			t.Errorf("app.js still contains full-refresh marker %q", forbidden)
-		}
-	}
-
-	htmlData, err := readEmbeddedFile("webapp.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(htmlData), "#dash.refreshing") {
-		t.Fatal("webapp.html still fades the whole dashboard while refreshing")
 	}
 }
 
@@ -1156,7 +1089,7 @@ func TestBuildVersionInjection(t *testing.T) {
 	pageRec := httptest.NewRecorder()
 	handler.ServeHTTP(pageRec, httptest.NewRequest(http.MethodGet, "/", nil))
 	if !strings.Contains(pageRec.Body.String(), `name="app-version" content="abc1234"`) {
-		t.Fatal("webapp.html missing injected version meta")
+		t.Fatal("SPA index missing injected version meta")
 	}
 
 	healthRec := httptest.NewRecorder()

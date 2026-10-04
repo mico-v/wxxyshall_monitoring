@@ -24,6 +24,11 @@ bin/
 *.log
 nohup.out
 
+# 前端构建依赖
+node_modules/
+frontend/dist/
+frontend/.vite/
+
 # 编辑器
 .vscode/
 .idea/

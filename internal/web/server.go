@@ -2,7 +2,6 @@ package web
 
 import (
 	"bufio"
-	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -150,6 +149,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/verify", s.requireAdminKey(s.handleAdminVerify))
 
 	// 静态文件
+	mux.HandleFunc("GET /assets/", s.handleSPAAsset)
 	mux.HandleFunc("GET /static/", s.handleStatic)
 	mux.HandleFunc("GET /favicon.ico", s.serveFile("favicon.ico", "image/x-icon"))
 	mux.HandleFunc("GET /sw.js", s.serveFile("sw.js", "application/javascript; charset=utf-8"))
@@ -1193,25 +1193,7 @@ func (s *Server) serveFile(filename, ctype string) http.HandlerFunc {
 }
 
 func (s *Server) serveWebApp(w http.ResponseWriter, homepageShown bool) {
-	data, err := readEmbeddedFile("webapp.html")
-	if err != nil {
-		fullPath := filepath.Join(s.rootDir, "webapp.html")
-		data, err = os.ReadFile(fullPath)
-		if err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-			return
-		}
-	}
-	value := "true"
-	if !homepageShown {
-		value = "false"
-	}
-	data = injectVersion(data)
-	data = bytes.Replace(data, []byte(`<body data-show-homepage="true">`), []byte(`<body data-show-homepage="`+value+`">`), 1)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.Header().Set("Cache-Control", "no-cache")
-	_, _ = w.Write(data)
+	s.serveSPAIndex(w, homepageShown)
 }
 
 func (s *Server) handle404(w http.ResponseWriter, r *http.Request) {
