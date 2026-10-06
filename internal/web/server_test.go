@@ -540,6 +540,53 @@ func TestConfigAPIReportsGuestAddPolicy(t *testing.T) {
 	}
 }
 
+func TestConfigAPIReportsCollectButtonPolicy(t *testing.T) {
+	server := newTestServer(t)
+	handler := server.Handler()
+	readPolicy := func() string {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("config status = %d", recorder.Code)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		mode, ok := body["show_collect_button"].(string)
+		if !ok {
+			t.Fatalf("show_collect_button missing from public config: %s", recorder.Body.String())
+		}
+		return mode
+	}
+
+	if got := readPolicy(); got != config.ShowCollectButtonAlways {
+		t.Fatalf("default show_collect_button = %q, want %q", got, config.ShowCollectButtonAlways)
+	}
+
+	update := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"show_collect_button":"never"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	handler.ServeHTTP(update, req)
+	if update.Code != http.StatusOK {
+		t.Fatalf("update show_collect_button status = %d body=%s", update.Code, update.Body.String())
+	}
+	if got := readPolicy(); got != config.ShowCollectButtonNever {
+		t.Fatalf("show_collect_button = %q, want %q", got, config.ShowCollectButtonNever)
+	}
+
+	invalid := httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"show_collect_button":"sometimes"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	handler.ServeHTTP(invalid, req)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid show_collect_button status = %d, want 400", invalid.Code)
+	}
+}
+
 func TestGuestAddTargetPolicyRejectsKeylessAdditions(t *testing.T) {
 	server := newTestServer(t)
 	handler := server.Handler()

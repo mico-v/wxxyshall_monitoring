@@ -44,6 +44,7 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
   "admin_auth_enabled": false,
   "show_homepage": true,
   "allow_guest_add_target": true,
+  "show_collect_button": "always",
   "webhook": {
     "enabled": false,
     "url": "http://127.0.0.1:9966/send",
@@ -68,6 +69,7 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
 - `admin_auth_enabled`：管理接口是否要求管理密钥，默认 `false`。关闭时仍会生成和保留 `.admin_key`，且密钥校验接口 `/api/admin/verify` 始终严格验证；
 - `show_homepage`：是否公开显示全部宿舍主页，默认 `true`。设为 `false` 后，未登录访客打开主页看到的是一个与单宿舍页「查询设置」一致的宿舍选择器（可跳转或添加宿舍），看不到聚合数据；已登录（浏览器保存了有效管理密钥）时主页照常直接显示聚合仪表盘，无需重复输入密钥。单宿舍页不显示返回主页按钮。无论该开关如何取值，单宿舍页始终公开可访问；
 - `allow_guest_add_target`：未登录访客能否添加宿舍，默认 `true`（与旧版本行为一致）。仅在 `admin_auth_enabled=false` 时生效——管理鉴权开启时任何添加都需要密钥。设为 `false` 后，网页「添加宿舍」和 `POST /api/config` 的单宿舍添加都需要带管理密钥，否则返回 401；
+- `show_collect_button`：主页和单宿舍页「立即采集」按钮的显隐策略，默认 `always`。可选 `always`（所有访客始终可见）、`when_logged_in`（仅已登录访客可见；`admin_auth_enabled=false` 时所有人视为已登录，因此仍然可见）和 `never`（始终隐藏）。隐藏按钮不影响定时采集、Webhook 或采集 API；
 - `webhook`：采集通知配置。`enabled` 为 `true` 时向 `url` 发送 `webhook.body` 中定义的 JSON 对象，并使用 `Authorization: Bearer <token>` 鉴权。`body` 支持任意 JSON 字段、嵌套对象和数组；程序不会内置或追加 `content`、`umo` 等字段。每个成功采集的宿舍会按照自己的 `notify_mode` 决定是否发送。
 - `webhook.body` 中的字符串支持 `{{label}}`、`{{campus}}`、`{{building}}`、`{{room}}`、`{{ts}}`、`{{surplus_charge}}`、`{{low_balance_threshold}}`、`{{total_usage}}` 占位符，替换会递归应用到嵌套对象和数组。旧版顶层 `umo` / `content_template` 配置会自动迁移到 `body`。
 - `webhook.notify_mode` 及 `low_balance_threshold` 为全局 webhook 的兼容配置；宿舍未设置 `notify_mode` 时，仍可使用 `low_balance`、`balance_decrease` 或 `every_collection` 规则。新配置建议使用宿舍级 `notify_mode`。

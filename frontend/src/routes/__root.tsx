@@ -29,6 +29,13 @@ function RootLayout() {
   const aggregate = !!room || config?.show_homepage !== false || verified;
   const picker = !room && !aggregate;
 
+  // 采集按钮策略：always 始终显示；when_logged_in 仅登录后显示，但管理鉴权
+  // 关闭时所有人视为已登录；never 始终隐藏。配置缺失时回退为显示，兼容旧服务。
+  const collectMode = config?.show_collect_button ?? 'always';
+  const showCollectButton =
+    collectMode === 'always' ||
+    (collectMode === 'when_logged_in' && (config?.admin_auth_required === false || verified));
+
   const value = React.useMemo<AppContextValue>(
     () => ({
       room,
@@ -36,9 +43,10 @@ function RootLayout() {
       aggregate,
       picker,
       canAdd: verified || config?.guest_add_allowed === true,
+      showCollectButton,
       targets: config?.targets ?? [],
     }),
-    [room, config, aggregate, picker, verified],
+    [room, config, aggregate, picker, verified, showCollectButton],
   );
 
   // 主页需要配置来判定 show_homepage；宿舍页数据公开，可先渲染。

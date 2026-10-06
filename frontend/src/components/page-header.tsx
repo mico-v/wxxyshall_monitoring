@@ -10,7 +10,7 @@ import { useApp } from '@/lib/app-context';
 import { PAGE_CONTAINER_CLASSES } from '@/lib/constants';
 
 export function PageHeader({ onOpenSettings }: { onOpenSettings: () => void }) {
-  const { picker, canAdd } = useApp();
+  const { picker, canAdd, showCollectButton } = useApp();
   const { hasKey, ensureKey, logout } = useAdmin();
   const { toast } = useToast();
   const [openingSettings, setOpeningSettings] = React.useState(false);
@@ -43,7 +43,7 @@ export function PageHeader({ onOpenSettings }: { onOpenSettings: () => void }) {
         <div className="flex flex-wrap items-center gap-2">
           {!picker && (
             <>
-              <CollectButton />
+              {showCollectButton && <CollectButton />}
               <Button
                 variant="outline"
                 size="sm"

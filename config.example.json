@@ -8,6 +8,7 @@
   "admin_auth_enabled": false,
   "show_homepage": true,
   "allow_guest_add_target": true,
+  "show_collect_button": "always",
   "webhook": {
     "enabled": false,
     "url": "",

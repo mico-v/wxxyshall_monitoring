@@ -28,6 +28,14 @@ const (
 	DefaultWebhookThreshold   = 10.0
 	DefaultWebhookTemplate    = "【电费监控】{{label}} 当前余额：{{surplus_charge}}，采集时间：{{ts}}"
 	DefaultTargetNotifyTime   = "08:00"
+
+	// 采集按钮显示策略。
+	// always：所有访客始终可见；when_logged_in：仅登录用户可见，
+	// 但管理鉴权关闭时所有人视为已登录；never：始终隐藏。
+	ShowCollectButtonAlways       = "always"
+	ShowCollectButtonWhenLoggedIn = "when_logged_in"
+	ShowCollectButtonNever        = "never"
+	DefaultShowCollectButton      = ShowCollectButtonAlways
 )
 
 // Target 代表一个监控宿舍目标。
@@ -109,7 +117,25 @@ type Config struct {
 	AdminAuthEnabled   bool          `json:"admin_auth_enabled"`
 	ShowHomepage       *bool         `json:"show_homepage"`
 	AllowGuestAdd      *bool         `json:"allow_guest_add_target"`
+	ShowCollectButton  string        `json:"show_collect_button"`
 	Webhook            WebhookConfig `json:"webhook"`
+}
+
+// IsCollectButtonVisible reports whether the "立即采集" button should be shown.
+// authenticated 表示访客是否已通过管理鉴权；当 AdminAuthEnabled 为 false 时，
+// 所有人视为已登录。未知/空值按默认策略 always 处理。
+func (c *Config) IsCollectButtonVisible(authenticated bool) bool {
+	if c == nil {
+		return true
+	}
+	switch c.ShowCollectButton {
+	case ShowCollectButtonNever:
+		return false
+	case ShowCollectButtonWhenLoggedIn:
+		return !c.AdminAuthEnabled || authenticated
+	default:
+		return true
+	}
 }
 
 // IsHomepageShown reports whether the aggregate homepage is publicly visible.
@@ -361,6 +387,9 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.RateLimitPerMinute < 1 || cfg.RateLimitPerMinute > 600 {
 		return fmt.Errorf("rate_limit_per_minute 必须在 1..600 之间")
 	}
+	if cfg.ShowCollectButton != "" && !isValidCollectButtonMode(cfg.ShowCollectButton) {
+		return fmt.Errorf("show_collect_button 必须是 always、when_logged_in 或 never")
+	}
 	if err := validateWebhook(cfg.Webhook); err != nil {
 		return err
 	}
@@ -428,6 +457,10 @@ func normalizeConfig(cfg *Config) {
 		allowed := true
 		cfg.AllowGuestAdd = &allowed
 	}
+	cfg.ShowCollectButton = strings.TrimSpace(cfg.ShowCollectButton)
+	if cfg.ShowCollectButton == "" {
+		cfg.ShowCollectButton = DefaultShowCollectButton
+	}
 	normalizeWebhook(&cfg.Webhook)
 	for i := range cfg.Targets {
 		t := &cfg.Targets[i]
@@ -489,6 +522,15 @@ func normalizeWebhook(webhook *WebhookConfig) {
 	}
 	if webhook.LowBalanceThreshold == 0 {
 		webhook.LowBalanceThreshold = DefaultWebhookThreshold
+	}
+}
+
+func isValidCollectButtonMode(mode string) bool {
+	switch mode {
+	case ShowCollectButtonAlways, ShowCollectButtonWhenLoggedIn, ShowCollectButtonNever:
+		return true
+	default:
+		return false
 	}
 }
 

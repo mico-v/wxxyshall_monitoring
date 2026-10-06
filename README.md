@@ -188,6 +188,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
   "admin_auth_enabled": false,
   "show_homepage": true,
   "allow_guest_add_target": true,
+  "show_collect_button": "always",
   "webhook": {
     "enabled": false,
     "url": "http://127.0.0.1:9966/send",
@@ -211,6 +212,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 - `admin_auth_enabled` 默认 `false`；开启后管理 API 需要密钥。无论是否开启，程序仍会生成 `.admin_key`，密钥验证接口也始终严格校验。
 - `show_homepage` 默认 `true`；关闭后未登录访客打开主页看到的是与单宿舍页「查询设置」一致的宿舍选择器（可跳转或添加宿舍），不显示聚合数据；已登录时主页直接显示聚合仪表盘，单宿舍页也不再显示返回主页按钮。
 - `allow_guest_add_target` 默认 `true`；仅在 `admin_auth_enabled=false` 时生效。设为 `false` 后，未登录访客不能添加宿舍（网页入口和 `POST /api/config` 都要求管理密钥），适合「主页隐藏 + 管理鉴权关闭」仍不希望访客自行添加宿舍的部署。
+- `show_collect_button` 默认 `always`，控制主页和单宿舍页「立即采集」按钮的显隐：`always` 所有访客可见，`when_logged_in` 仅已登录访客可见（`admin_auth_enabled=false` 时所有人视为已登录，仍然可见），`never` 始终隐藏。隐藏按钮不影响定时采集、Webhook 或采集 API。
 - 每个目标的 `feeitemid`、`appId` 必须为正整数，`campus/building/room` 非空且组合不可重复。
 - 目标的 `show_in_web` 可省略，默认 `true`；设为 `false` 后仍会定时/手动采集，但不会出现在公开配置、读数、宿舍页面或 SSE 中。
 - 目标的 `poll_interval_minutes` 可省略；省略时继承全局 `poll_interval_minutes`，设置后以该宿舍的 `1..10080` 分钟周期覆盖全局值。

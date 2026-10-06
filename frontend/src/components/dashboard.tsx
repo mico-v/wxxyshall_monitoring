@@ -194,7 +194,7 @@ function KpiSkeleton() {
 }
 
 export function Dashboard({ room, days, onDaysChange }: DashboardProps) {
-  const { aggregate, targets } = useApp();
+  const { aggregate, targets, showCollectButton } = useApp();
   const { key, setKey } = useAdmin();
   const { toast } = useToast();
   const navigate = useNavigate();
@@ -326,7 +326,9 @@ export function Dashboard({ room, days, onDaysChange }: DashboardProps) {
         <div className="rounded-lg border border-dashed border-border py-12 text-center text-sm text-muted-foreground">
           {readings.isError
             ? '读取失败，请稍后重试'
-            : '暂无读数，可点击“立即采集”获取第一条记录'}
+            : showCollectButton
+              ? '暂无读数，可点击“立即采集”获取第一条记录'
+              : '暂无读数'}
         </div>
       ) : (
         singleGroup && <SingleKpis group={singleGroup} />

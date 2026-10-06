@@ -6,6 +6,7 @@ import { BalanceBars, buildBalanceBuckets } from '@/components/balance-bars';
 import { balanceDelta, balanceStatus, fmt } from '@/lib/format';
 import { prefetchRoom } from '@/lib/hooks';
 import { useAdmin } from '@/lib/admin';
+import { useApp } from '@/lib/app-context';
 import type { RoomGroup } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -104,6 +105,7 @@ interface RoomListProps {
 
 /** 主页：一列式宿舍列表，每行下方是颜色映射电量的状态条。 */
 export function RoomList({ groups, start, end, loading, days }: RoomListProps) {
+  const { showCollectButton } = useApp();
   return (
     <div className="overflow-hidden rounded-lg border border-border bg-card shadow-xs">
       <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
@@ -114,7 +116,7 @@ export function RoomList({ groups, start, end, loading, days }: RoomListProps) {
       </div>
       {groups.length === 0 ? (
         <p className="px-4 py-12 text-center text-sm text-muted-foreground">
-          {loading ? '加载中…' : '暂无读数，可点击“立即采集”获取第一条记录'}
+          {loading ? '加载中…' : showCollectButton ? '暂无读数，可点击“立即采集”获取第一条记录' : '暂无读数'}
         </p>
       ) : (
         <div className="divide-y divide-border">

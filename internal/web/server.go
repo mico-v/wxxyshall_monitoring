@@ -603,6 +603,9 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		"defaults":            map[string]int{"feeitemid": config.DefaultFeeItemID, "appId": config.DefaultAppID},
 		"admin_auth_required": cfg.AdminAuthEnabled,
 		"show_homepage":       cfg.IsHomepageShown(),
+		// 采集按钮显隐策略：always / when_logged_in / never。
+		// 前端结合 admin_auth_required 与登录态决定是否渲染「立即采集」。
+		"show_collect_button": cfg.ShowCollectButton,
 		// 前端唯一需要的"未登录能否添加宿舍"判据：管理鉴权开启时任何人添加都要密钥。
 		"guest_add_allowed": s.guestAddAllowed(cfg),
 	}
@@ -628,6 +631,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		out["rate_limit_per_minute"] = cfg.RateLimitPerMinute
 		out["admin_auth_enabled"] = cfg.AdminAuthEnabled
 		out["show_homepage"] = cfg.IsHomepageShown()
+		out["show_collect_button"] = cfg.ShowCollectButton
 		out["webhook"] = map[string]any{
 			"enabled":               cfg.Webhook.Enabled,
 			"url":                   cfg.Webhook.URL,
@@ -652,6 +656,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		RateLimitPerMinute *int                `json:"rate_limit_per_minute"`
 		AdminAuthEnabled   *bool               `json:"admin_auth_enabled"`
 		ShowHomepage       *bool               `json:"show_homepage"`
+		ShowCollectButton  *string             `json:"show_collect_button"`
 		Webhook            *webhookConfigPatch `json:"webhook"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
@@ -682,6 +687,14 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rate_limit_per_minute 必须在 1..600 之间"})
 		return
 	}
+	if body.ShowCollectButton != nil {
+		switch strings.TrimSpace(*body.ShowCollectButton) {
+		case config.ShowCollectButtonAlways, config.ShowCollectButtonWhenLoggedIn, config.ShowCollectButtonNever:
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "show_collect_button 必须是 always、when_logged_in 或 never"})
+			return
+		}
+	}
 	if body.Targets != nil {
 		for i, target := range *body.Targets {
 			if target.FeeItemID <= 0 || target.AppID <= 0 {
@@ -695,7 +708,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	if body.Target != nil {
 		if body.Username != nil || body.Port != nil || body.BaseURL != nil || body.Targets != nil ||
 			body.PollIntervalMin != nil || body.RateLimitPerMinute != nil ||
-			body.AdminAuthEnabled != nil || body.ShowHomepage != nil || body.Webhook != nil {
+			body.AdminAuthEnabled != nil || body.ShowHomepage != nil || body.ShowCollectButton != nil || body.Webhook != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target 不能与其他配置字段同时提交"})
 			return
 		}
@@ -795,6 +808,9 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		if body.ShowHomepage != nil {
 			value := *body.ShowHomepage
 			cfg.ShowHomepage = &value
+		}
+		if body.ShowCollectButton != nil {
+			cfg.ShowCollectButton = strings.TrimSpace(*body.ShowCollectButton)
 		}
 		if body.Webhook != nil {
 			webhookCfg := cfg.Webhook

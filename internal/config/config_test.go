@@ -146,6 +146,62 @@ func TestConfigNewDefaultsAndLegacyHomepageCompatibility(t *testing.T) {
 	}
 }
 
+func TestShowCollectButtonOption(t *testing.T) {
+	base := `{
+  "username":"u","base_url":"https://example.com","targets":[],
+  "poll_interval_minutes":60,"rate_limit_per_minute":30
+}`
+	cfg, err := parseConfig([]byte(base), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ShowCollectButton != ShowCollectButtonAlways {
+		t.Fatalf("omitted show_collect_button = %q, want %q", cfg.ShowCollectButton, ShowCollectButtonAlways)
+	}
+
+	for _, mode := range []string{ShowCollectButtonAlways, ShowCollectButtonWhenLoggedIn, ShowCollectButtonNever} {
+		raw := strings.Replace(base, "\"rate_limit_per_minute\":30", "\"rate_limit_per_minute\":30,\"show_collect_button\":\""+mode+"\"", 1)
+		parsed, err := parseConfig([]byte(raw), "test")
+		if err != nil {
+			t.Fatalf("mode %q should parse: %v", mode, err)
+		}
+		if parsed.ShowCollectButton != mode {
+			t.Fatalf("show_collect_button = %q, want %q", parsed.ShowCollectButton, mode)
+		}
+	}
+
+	invalid := strings.Replace(base, "\"rate_limit_per_minute\":30", "\"rate_limit_per_minute\":30,\"show_collect_button\":\"sometimes\"", 1)
+	if _, err := parseConfig([]byte(invalid), "test"); err == nil {
+		t.Fatal("invalid show_collect_button should be rejected")
+	}
+}
+
+func TestIsCollectButtonVisible(t *testing.T) {
+	always := &Config{ShowCollectButton: ShowCollectButtonAlways, AdminAuthEnabled: true}
+	if !always.IsCollectButtonVisible(false) {
+		t.Fatal("always should be visible to guests")
+	}
+
+	never := &Config{ShowCollectButton: ShowCollectButtonNever, AdminAuthEnabled: false}
+	if never.IsCollectButtonVisible(true) {
+		t.Fatal("never should stay hidden")
+	}
+
+	loggedIn := &Config{ShowCollectButton: ShowCollectButtonWhenLoggedIn, AdminAuthEnabled: true}
+	if loggedIn.IsCollectButtonVisible(false) {
+		t.Fatal("when_logged_in should hide for guests while admin auth is on")
+	}
+	if !loggedIn.IsCollectButtonVisible(true) {
+		t.Fatal("when_logged_in should show for authenticated users")
+	}
+
+	// 管理鉴权关闭时，所有人视为已登录。
+	open := &Config{ShowCollectButton: ShowCollectButtonWhenLoggedIn, AdminAuthEnabled: false}
+	if !open.IsCollectButtonVisible(false) {
+		t.Fatal("when_logged_in should count everyone as logged in without admin auth")
+	}
+}
+
 func TestGuestAddTargetOption(t *testing.T) {
 	cfg, err := parseConfig([]byte(`{
   "username":"u","base_url":"https://example.com","targets":[],

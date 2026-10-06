@@ -9,6 +9,8 @@ export interface AppContextValue {
   /** 主页隐藏且未登录：显示宿舍选择器落地页。 */
   picker: boolean;
   canAdd: boolean;
+  /** 是否渲染「立即采集」按钮（由 show_collect_button 与登录态决定）。 */
+  showCollectButton: boolean;
   targets: Target[];
 }
 

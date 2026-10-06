@@ -55,12 +55,16 @@ export interface PowerPoint {
   power_kw: number | null;
 }
 
+export type CollectButtonMode = 'always' | 'when_logged_in' | 'never';
+
 export interface PublicConfig {
   targets: Target[] | null;
   defaults: { feeitemid: number; appId: number };
   admin_auth_required: boolean;
   show_homepage: boolean;
   guest_add_allowed: boolean;
+  /** 「立即采集」按钮显隐策略。 */
+  show_collect_button?: CollectButtonMode;
   target_exists?: boolean;
   target_hidden?: boolean;
 }
