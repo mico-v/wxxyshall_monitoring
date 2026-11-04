@@ -16,7 +16,7 @@ func testConfig() *Config {
 
 func newTestHub(t *testing.T) *Hub {
 	t.Helper()
-	t.Setenv("ELEc_DIR", t.TempDir())
+	t.Setenv(EnvDir, t.TempDir())
 	if err := SaveConfig(testConfig()); err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestHubUpdateMergesWithLatestExternalConfig(t *testing.T) {
 }
 
 func TestLoadConfigRejectsUnknownFieldsButAcceptsLegacyAdminKey(t *testing.T) {
-	t.Setenv("ELEc_DIR", t.TempDir())
+	t.Setenv(EnvDir, t.TempDir())
 	if err := os.MkdirAll(DataDir(), 0750); err != nil {
 		t.Fatal(err)
 	}

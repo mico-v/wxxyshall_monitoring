@@ -1,6 +1,6 @@
 // token_status 查看 token 状态：有效期、是否临近过期。
 //
-// 用法: token_status（数据目录由 ELEc_DIR 指定）
+// 用法: token_status（数据目录由 ELEC_DIR 指定）
 package main
 
 import (

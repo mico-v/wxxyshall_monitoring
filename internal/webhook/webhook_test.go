@@ -245,7 +245,7 @@ func TestNotifierLogsSuccessfulDelivery(t *testing.T) {
 
 func testWebhookHub(t *testing.T, webhook config.WebhookConfig) *config.Hub {
 	t.Helper()
-	t.Setenv("ELEc_DIR", t.TempDir())
+	t.Setenv(config.EnvDir, t.TempDir())
 	if err := config.SaveConfig(&config.Config{
 		Username: "u", Port: 8080, BaseURL: config.DefaultBaseURL,
 		PollIntervalMin: 60, RateLimitPerMinute: 30,

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -114,10 +115,10 @@ func TestConfigGetTargets(t *testing.T) {
 
 func TestConfigDefaults(t *testing.T) {
 	// Save and restore env
-	old := os.Getenv("ELEc_DIR")
-	defer os.Setenv("ELEc_DIR", old)
+	old := os.Getenv(EnvDir)
+	defer os.Setenv(EnvDir, old)
 
-	os.Setenv("ELEc_DIR", "/tmp/elec-test")
+	os.Setenv(EnvDir, "/tmp/elec-test")
 	got := DataDir()
 	if got != "/tmp/elec-test/data" {
 		t.Fatalf("expected /tmp/elec-test/data, got %q", got)
@@ -304,7 +305,7 @@ func TestNormalizeFillsTargetFieldDefaults(t *testing.T) {
 
 func TestSaveConfigWritesAllTargetFields(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("ELEc_DIR", root)
+	t.Setenv(EnvDir, root)
 	cfg := &Config{
 		Username: "u", Port: 8080, BaseURL: "https://example.com",
 		PollIntervalMin: 60, RateLimitPerMinute: 30,
@@ -376,5 +377,100 @@ func testConfigForWebhook() *Config {
 	return &Config{
 		Username: "u", Port: 8080, BaseURL: DefaultBaseURL,
 		PollIntervalMin: 60, RateLimitPerMinute: 30,
+	}
+}
+
+func TestDirFromEnvPrefersCanonicalName(t *testing.T) {
+	t.Setenv(EnvDir, "/canonical")
+	t.Setenv(legacyEnvDir, "/legacy")
+	if got := DirFromEnv(); got != "/canonical" {
+		t.Fatalf("ELEC_DIR 应优先于旧拼写，got %q", got)
+	}
+}
+
+func TestDirFromEnvFallsBackToLegacyName(t *testing.T) {
+	t.Setenv(EnvDir, "")
+	t.Setenv(legacyEnvDir, "/legacy")
+
+	// 旧拼写仍需生效（兼容既有部署），但要给出弃用提示。
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origStderr := os.Stderr
+	os.Stderr = w
+	got := DirFromEnv()
+	os.Stderr = origStderr
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+	_ = r.Close()
+
+	if got != "/legacy" {
+		t.Fatalf("旧拼写应继续生效，got %q", got)
+	}
+	if !strings.Contains(string(out), legacyEnvDir) {
+		t.Fatalf("应打印弃用提示，got %q", string(out))
+	}
+}
+
+func TestDirFromEnvEmpty(t *testing.T) {
+	t.Setenv(EnvDir, "")
+	t.Setenv(legacyEnvDir, "")
+	if got := DirFromEnv(); got != "" {
+		t.Fatalf("expected empty, got %q", got)
+	}
+}
+
+func TestValidateBind(t *testing.T) {
+	valid := []string{"", "127.0.0.1", "0.0.0.0", "::1", "::", "localhost", "elec.internal"}
+	for _, bind := range valid {
+		if err := validateBind(bind); err != nil {
+			t.Errorf("bind %q 应合法，got %v", bind, err)
+		}
+	}
+	invalid := []string{"127.0.0.1:8080", "192.168.1.1:80", "host name", "1.2.3.4/24"}
+	for _, bind := range invalid {
+		if err := validateBind(bind); err == nil {
+			t.Errorf("bind %q 应被判为非法", bind)
+		}
+	}
+}
+
+func TestParseConfigBind(t *testing.T) {
+	cfg, err := parseConfig([]byte(`{
+  "username":"u","port":8080,"bind":" 127.0.0.1 ","base_url":"https://example.com",
+  "targets":[],"poll_interval_minutes":60,"rate_limit_per_minute":30
+}`), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Bind != "127.0.0.1" {
+		t.Fatalf("bind 应被 trim，got %q", cfg.Bind)
+	}
+
+	if _, err := parseConfig([]byte(`{
+  "username":"u","port":8080,"bind":"127.0.0.1:8080","base_url":"https://example.com",
+  "targets":[],"poll_interval_minutes":60,"rate_limit_per_minute":30
+}`), "test"); err == nil {
+		t.Fatal("带端口的 bind 应被拒绝")
+	}
+}
+
+func TestSaveConfigOmitsEmptyBind(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(EnvDir, root)
+	cfg := &Config{
+		Username: "u", Port: 8080, BaseURL: "https://example.com",
+		PollIntervalMin: 60, RateLimitPerMinute: 30,
+	}
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"bind"`) {
+		t.Fatalf("bind 为空时不应写出该字段: %s", raw)
 	}
 }

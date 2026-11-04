@@ -23,7 +23,7 @@ import (
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	root := t.TempDir()
-	t.Setenv("ELEc_DIR", root)
+	t.Setenv(config.EnvDir, root)
 	cfg := &config.Config{
 		Username: "20260001", Port: 8080, BaseURL: config.DefaultBaseURL,
 		PollIntervalMin: 60, RateLimitPerMinute: 30,

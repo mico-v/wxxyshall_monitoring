@@ -1,5 +1,5 @@
 // Package config 管理配置文件和 token 文件的读写。
-// 数据目录由 ELEc_DIR 环境变量指定；Linux 默认 /opt/elec/data，
+// 数据目录由 ELEC_DIR 环境变量指定；Linux 默认 /opt/elec/data，
 // Windows 默认 %LOCALAPPDATA%/WxxyshallMonitoring/data。
 package config
 
@@ -10,12 +10,36 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// 数据目录环境变量。
+const (
+	// EnvDir 指定数据目录（其下的 data 子目录存放 config.json / token.json / DB）。
+	EnvDir = "ELEC_DIR"
+
+	// legacyEnvDir 是历史拼写错误（小写 c）的变量名，仅为兼容既有部署保留，
+	// 使用时会打印弃用提示。新部署请一律使用 EnvDir。
+	legacyEnvDir = "ELEc_DIR"
+)
+
+// DirFromEnv 返回环境变量指定的数据目录；未设置时返回空串。
+// 旧的 ELEc_DIR 仍然生效，但会向 stderr 打印弃用提示。
+func DirFromEnv() string {
+	if d := strings.TrimSpace(os.Getenv(EnvDir)); d != "" {
+		return d
+	}
+	if d := strings.TrimSpace(os.Getenv(legacyEnvDir)); d != "" {
+		fmt.Fprintf(os.Stderr, "警告: 环境变量 %s 已废弃，请改用 %s\n", legacyEnvDir, EnvDir)
+		return d
+	}
+	return ""
+}
 
 const (
 	DefaultBaseURL            = "https://wxxyshall.usts.edu.cn"
@@ -107,9 +131,14 @@ func (t Target) EffectiveWebhook(global WebhookConfig) WebhookConfig {
 }
 
 // Config 是 config.json 的完整映射。
+//
+// Bind 是仪表盘的监听地址（IP 或主机名），端口由 Port 指定；留空表示沿用平台默认
+// （Linux 监听所有地址，Windows/其它平台仅 127.0.0.1）。反向代理部署时建议设为
+// "127.0.0.1"，避免绕过 TLS 直接暴露明文端口。
 type Config struct {
 	Username           string        `json:"username"`
 	Port               int           `json:"port"`
+	Bind               string        `json:"bind,omitempty"` // 监听地址，空=平台默认
 	BaseURL            string        `json:"base_url"`
 	Targets            []Target      `json:"targets"`
 	PollIntervalMin    int           `json:"poll_interval_minutes"`
@@ -213,9 +242,9 @@ func (c *Config) GetWebTargets() []Target {
 }
 
 // DataDir 返回数据目录路径。
-// 优先使用 ELEc_DIR 环境变量下的 data 子目录，否则使用平台默认目录。
+// 优先使用 ELEC_DIR 环境变量下的 data 子目录，否则使用平台默认目录。
 func DataDir() string {
-	if d := os.Getenv("ELEc_DIR"); d != "" {
+	if d := DirFromEnv(); d != "" {
 		return filepath.Join(d, "data")
 	}
 	return defaultDataDir()
@@ -376,6 +405,9 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Port < 1024 || cfg.Port > 65535 {
 		return fmt.Errorf("port 必须在 1024..65535 之间")
 	}
+	if err := validateBind(cfg.Bind); err != nil {
+		return err
+	}
 	u, err := url.Parse(cfg.BaseURL)
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
 		(u.Scheme != "http" && u.Scheme != "https") {
@@ -434,8 +466,33 @@ func ValidateConfig(cfg *Config) error {
 	return nil
 }
 
+// validateBind 校验监听地址：接受 IP（含 IPv6）或主机名，不接受带端口的写法。
+func validateBind(bind string) error {
+	if bind == "" {
+		return nil
+	}
+	if len(bind) > 253 {
+		return fmt.Errorf("bind 过长")
+	}
+	if _, err := netip.ParseAddr(bind); err == nil {
+		return nil
+	}
+	// 端口必须走 port 字段；这里挡掉 "127.0.0.1:8080" 这类误填。
+	if strings.Contains(bind, ":") {
+		return fmt.Errorf("bind 只能是 IP 或主机名，端口请用 port 字段")
+	}
+	for _, r := range bind {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-' || r == '_' {
+			continue
+		}
+		return fmt.Errorf("bind 包含非法字符: %q", r)
+	}
+	return nil
+}
+
 func normalizeConfig(cfg *Config) {
 	cfg.Username = strings.TrimSpace(cfg.Username)
+	cfg.Bind = strings.TrimSpace(cfg.Bind)
 	if cfg.Port == 0 {
 		cfg.Port = DefaultPort
 	}

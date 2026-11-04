@@ -5,10 +5,12 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"golang.org/x/sys/windows"
@@ -22,23 +24,23 @@ const windowsInstallName = "WxxyshallMonitoring"
 var windowsMutex windows.Handle
 
 func platformInitialize() {
-	if os.Getenv("ELEc_DIR") != "" {
+	if config.DirFromEnv() != "" {
 		return
 	}
 	for i, arg := range os.Args[1:] {
 		if arg == "--root" && i+2 <= len(os.Args[1:]) {
-			_ = os.Setenv("ELEc_DIR", os.Args[i+2])
+			_ = os.Setenv(config.EnvDir, os.Args[i+2])
 			return
 		}
 		if strings.HasPrefix(arg, "--root=") {
-			_ = os.Setenv("ELEc_DIR", strings.TrimPrefix(arg, "--root="))
+			_ = os.Setenv(config.EnvDir, strings.TrimPrefix(arg, "--root="))
 			return
 		}
 	}
 	if executable, err := os.Executable(); err == nil {
 		root := filepath.Dir(executable)
 		if _, err := os.Stat(filepath.Join(root, "data", "config.json")); err == nil {
-			_ = os.Setenv("ELEc_DIR", root)
+			_ = os.Setenv(config.EnvDir, root)
 		}
 	}
 }
@@ -59,7 +61,7 @@ func platformHelpText() string {
   双击图标打开仪表盘；右键可打开配置目录、切换开机启动或退出。
 
 环境变量:
-  ELEc_DIR    覆盖安装/数据根目录
+  ELEC_DIR    覆盖安装/数据根目录
   ADMIN_KEY   覆盖自动生成的管理密钥
 `
 }
@@ -74,7 +76,12 @@ func platformDefaultDir() string {
 	return filepath.Join(".", windowsInstallName)
 }
 
-func platformListenAddr(port int) string { return fmt.Sprintf("127.0.0.1:%d", port) }
+func platformListenAddr(port int, bind string) string {
+	if bind == "" {
+		bind = "127.0.0.1"
+	}
+	return net.JoinHostPort(bind, strconv.Itoa(port))
+}
 
 func platformConfigureLogging(data string) error {
 	file, err := os.OpenFile(filepath.Join(data, "elec.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0640)

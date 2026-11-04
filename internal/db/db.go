@@ -1,6 +1,6 @@
 // Package db 提供 SQLite 数据库操作。
 //
-// 数据文件默认位于 ELEc_DIR/data/electricity.db。
+// 数据文件默认位于 ELEC_DIR/data/electricity.db。
 // WAL 模式允许仪表盘读取与采集写入并发。
 package db
 

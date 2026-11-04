@@ -1,11 +1,12 @@
 # 配置文件说明
 
-Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%LOCALAPPDATA%\WxxyshallMonitoring\data\config.json`。设置 `ELEc_DIR` 后，两端都改用 `$ELEc_DIR/data/config.json`。
+Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%LOCALAPPDATA%\WxxyshallMonitoring\data\config.json`。设置 `ELEC_DIR` 后，两端都改用 `$ELEC_DIR/data/config.json`。
 
 ```json
 {
   "username": "学号",
   "port": 5009,
+  "bind": "127.0.0.1",
   "base_url": "https://wxxyshall.usts.edu.cn",
   "targets": [
     {
@@ -63,6 +64,7 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
 
 - `username`：学号，不能为空；
 - `port`：网页端口，范围 `1024..65535`；
+- `bind`：网页监听地址，可填 IP（含 IPv6）或主机名，端口仍由 `port` 指定。**留空即沿用平台默认**：Linux 监听所有地址（`0.0.0.0`），Windows/其它平台仅监听 `127.0.0.1`。用 Caddy/Nginx 反代时建议设为 `"127.0.0.1"`，否则明文端口会绕过反代直接暴露；写成 `"127.0.0.1:5009"` 这类带端口的格式会被拒绝（端口请用 `port`）；
 - `base_url`：学校服务地址，通常无需修改；
 - `poll_interval_minutes`：全局采集间隔，范围 `1..10080` 分钟；
 - `rate_limit_per_minute`：定时和手动电费采集的学校接口请求速率，范围 `1..600`；网页添加宿舍时使用的校区、楼栋、房间发现接口不受此项限制，由进程内缓存和并发合并管理；

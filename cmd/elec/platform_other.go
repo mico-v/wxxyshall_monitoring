@@ -4,8 +4,10 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 func platformDefaultDir() string {
@@ -19,7 +21,12 @@ func platformInitialize()               {}
 func platformReportError(string, error) {}
 func platformHelpText() string          { return linuxHelpText() }
 
-func platformListenAddr(port int) string                  { return fmt.Sprintf("127.0.0.1:%d", port) }
+func platformListenAddr(port int, bind string) string {
+	if bind == "" {
+		bind = "127.0.0.1"
+	}
+	return net.JoinHostPort(bind, strconv.Itoa(port))
+}
 func platformPrepareRun() (bool, error)                   { return false, nil }
 func platformConfigureLogging(string) error               { return nil }
 func secureDataPermissions(data string) error             { return secureDataPermissionsUnix(data) }

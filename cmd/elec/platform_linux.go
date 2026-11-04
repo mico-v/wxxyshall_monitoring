@@ -3,8 +3,9 @@
 package main
 
 import (
-	"fmt"
+	"net"
 	"os"
+	"strconv"
 )
 
 func platformDefaultDir() string { return installDir }
@@ -15,7 +16,14 @@ func platformReportError(string, error) {}
 
 func platformHelpText() string { return linuxHelpText() }
 
-func platformListenAddr(port int) string { return fmt.Sprintf(":%d", port) }
+// platformListenAddr 返回监听地址。
+// bind 为空时沿用历史行为：监听所有地址（":port"）；否则只绑指定地址。
+func platformListenAddr(port int, bind string) string {
+	if bind != "" {
+		return net.JoinHostPort(bind, strconv.Itoa(port))
+	}
+	return ":" + strconv.Itoa(port)
+}
 
 func platformPrepareRun() (bool, error) { return false, nil }
 

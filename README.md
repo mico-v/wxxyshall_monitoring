@@ -31,7 +31,7 @@
 pip install playwright requests
 playwright install chromium
 
-# 默认保存到当前目录 token.json；设置 ELEc_DIR 后保存到 ELEc_DIR/data/token.json
+# 默认保存到当前目录 token.json；设置 ELEC_DIR 后保存到 ELEC_DIR/data/token.json
 python3 login.py
 
 # 只推送到服务器，不在本地保存
@@ -60,8 +60,8 @@ python3 login.py --push https://elec.example.edu.cn --push-only \
 ```bash
 go build -o elec ./cmd/elec
 
-# ELEc_DIR 指安装根目录，数据实际位于其 data/ 子目录
-export ELEc_DIR="$PWD/.local-elec"
+# ELEC_DIR 指安装根目录，数据实际位于其 data/ 子目录
+export ELEC_DIR="$PWD/.local-elec"
 ./elec run
 ```
 
@@ -104,10 +104,10 @@ Windows 使用单个 `elec.exe`，首次运行会自动复制到：
 
 首次安装会自动打开带管理密钥的本机地址。密钥只保存在 `data\.admin_key`，不会写入注册表；网页读取 URL 中的 `key` 后会立即从地址栏移除。
 
-如果需要自定义位置，可在启动前设置 `ELEc_DIR`：
+如果需要自定义位置，可在启动前设置 `ELEC_DIR`：
 
 ```powershell
-$env:ELEc_DIR = 'D:\WxxyshallMonitoring'
+$env:ELEC_DIR = 'D:\WxxyshallMonitoring'
 .\elec.exe run
 ```
 
@@ -125,7 +125,7 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
 
 GitHub Actions 位于 `.github/workflows/release.yml`。推送到 `main` 会构建并上传 Linux amd64/arm64、Windows amd64 工件；推送 `v*` 标签还会自动创建 GitHub Release 并附加压缩包。
 
-首次运行会生成 `$ELEc_DIR/data/config.json` 和 `$ELEc_DIR/data/.admin_key`。默认打开 `http://localhost:5009`；`admin_auth_enabled` 默认关闭，开启后进入“查询设置”需输入管理密钥。也可直接打开 `http://localhost:5009/?key=<管理密钥>`；网页读取后会把 `key` 从地址栏移除，并长期保存在本浏览器的 `localStorage` 中，可随时点「退出登录」清除。
+首次运行会生成 `$ELEC_DIR/data/config.json` 和 `$ELEC_DIR/data/.admin_key`。默认打开 `http://localhost:5009`；`admin_auth_enabled` 默认关闭，开启后进入“查询设置”需输入管理密钥。也可直接打开 `http://localhost:5009/?key=<管理密钥>`；网页读取后会把 `key` 从地址栏移除，并长期保存在本浏览器的 `localStorage` 中，可随时点「退出登录」清除。
 
 ### systemd 安装
 
@@ -159,6 +159,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 {
   "username": "学号",
   "port": 5009,
+  "bind": "127.0.0.1",
   "base_url": "https://wxxyshall.usts.edu.cn",
   "targets": [
     {
@@ -206,6 +207,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 约束：
 
 - `username` 非空；`port` 为 `1024..65535`，与默认无特权 systemd 服务保持一致。
+- `bind` 为监听地址（IP 或主机名），留空沿用平台默认（Linux 监听所有地址，Windows 仅 `127.0.0.1`）。放在 Caddy/Nginx 后面时设成 `"127.0.0.1"`，避免明文端口绕过反代。
 - `base_url` 必须是有效的 HTTP/HTTPS 地址。
 - `poll_interval_minutes` 为 `1..10080`。
 - `rate_limit_per_minute` 为 `1..600`。例如 `30` 表示任意两次学校 HTTP 请求至少间隔 2 秒，并非一分钟突发 30 次。
@@ -271,7 +273,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 
 ## 数据与 PWA
 
-- SQLite 文件：`$ELEc_DIR/data/electricity.db`，包含全部历史；接口限制不删除数据库记录。
+- SQLite 文件：`$ELEC_DIR/data/electricity.db`，包含全部历史；接口限制不删除数据库记录。
 - Service Worker 只缓存同源公开 GET 请求。写请求、带 `Authorization` 的请求和 SSE 永不缓存。
 - 导航采用网络优先并回退到应用壳；公开 API 采用网络优先并回退到完全匹配（包括查询参数）的缓存。
 - PWA manifest 使用 192/512 PNG maskable 图标。

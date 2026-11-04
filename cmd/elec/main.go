@@ -14,7 +14,7 @@
 //
 // 环境变量:
 //
-//	ELEc_DIR    数据目录（默认 /opt/elec）
+//	ELEC_DIR    数据目录（默认 /opt/elec）
 //	ADMIN_KEY   管理密钥（自动生成）
 package main
 
@@ -109,7 +109,7 @@ func linuxHelpText() string {
   elec help               显示帮助
 
 环境变量:
-  ELEc_DIR    数据目录（默认 /opt/elec）
+  ELEC_DIR    数据目录（默认 /opt/elec）
   ADMIN_KEY   管理密钥（自动生成，查看: elec config）
 
 首次使用:
@@ -120,9 +120,9 @@ func linuxHelpText() string {
 `
 }
 
-// elecDir 返回数据目录。
+// elecDir 返回数据目录：优先 ELEC_DIR，否则使用平台默认目录。
 func elecDir() string {
-	if d := os.Getenv("ELEc_DIR"); d != "" {
+	if d := config.DirFromEnv(); d != "" {
 		return d
 	}
 	return platformDefaultDir()
@@ -185,8 +185,13 @@ func cmdInstallLinux() {
 		fatalInstall("生成默认配置失败", err)
 	}
 	dashboardPort := config.DefaultPort
+	dashboardHost := "服务器IP"
 	if cfg, err := config.LoadConfig(); err == nil {
 		dashboardPort = cfg.Port
+		// 只绑回环时，提示里就别再让人去访问「服务器IP」了。
+		if isLoopbackBind(cfg.Bind) {
+			dashboardHost = "127.0.0.1"
+		}
 	}
 
 	// 生成 ADMIN_KEY
@@ -216,7 +221,7 @@ Type=simple
 User=%s
 Group=%s
 WorkingDirectory=%s
-Environment="ELEc_DIR=%s"
+Environment="ELEC_DIR=%s"
 Environment="TZ=Asia/Shanghai"
 ExecStart=%s/elec run
 Restart=always
@@ -277,7 +282,7 @@ WantedBy=multi-user.target
 	fmt.Printf("  配置文件:   %s/config.json\n", data)
 	fmt.Printf("  管理密钥:   %s（仅本机可读）\n", keyFile)
 	fmt.Println("")
-	fmt.Printf("  仪表盘:     http://服务器IP:%d\n", dashboardPort)
+	fmt.Printf("  仪表盘:     http://%s:%d\n", dashboardHost, dashboardPort)
 	fmt.Println("")
 	fmt.Println("  登录（约 70 天一次）:")
 	fmt.Printf("  先安全读取密钥: sudo cat %s\n", keyFile)
@@ -370,7 +375,7 @@ func cmdRun() {
 		port = config.DefaultPort
 	}
 
-	addr := platformListenAddr(port)
+	addr := platformListenAddr(port, hub.Config().Bind)
 	httpServer := &http.Server{
 		Addr:              addr,
 		Handler:           server.Handler(),
@@ -394,7 +399,7 @@ func cmdRun() {
 		return
 	}
 	go func() {
-		slog.Info("仪表盘启动", "addr", addr, "port", port)
+		slog.Info("仪表盘启动", "addr", addr, "port", port, "bind", listener.Addr().String())
 		if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
 			slog.Error("HTTP 服务器错误", "err", err)
 			os.Exit(1)
@@ -988,4 +993,13 @@ func secureDataPermissionsUnix(data string) error {
 func fatalInstall(message string, err error) {
 	fmt.Printf("[✗] %s: %v\n", message, err)
 	os.Exit(1)
+}
+
+// isLoopbackBind 判断 bind 是否只绑定回环地址（用于安装提示里的 URL 展示）。
+func isLoopbackBind(bind string) bool {
+	switch strings.ToLower(strings.TrimSpace(bind)) {
+	case "127.0.0.1", "::1", "localhost", "127.0.1.1":
+		return true
+	}
+	return false
 }
