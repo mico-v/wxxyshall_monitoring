@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,17 +30,21 @@ const (
 )
 
 // DirFromEnv 返回环境变量指定的数据目录；未设置时返回空串。
-// 旧的 ELEc_DIR 仍然生效，但会向 stderr 打印弃用提示。
+// 旧的 ELEc_DIR 仍然生效，但会向 stderr 打印一次弃用提示。
 func DirFromEnv() string {
 	if d := strings.TrimSpace(os.Getenv(EnvDir)); d != "" {
 		return d
 	}
 	if d := strings.TrimSpace(os.Getenv(legacyEnvDir)); d != "" {
-		fmt.Fprintf(os.Stderr, "警告: 环境变量 %s 已废弃，请改用 %s\n", legacyEnvDir, EnvDir)
+		warnLegacyEnvOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "警告: 环境变量 %s 已废弃，请改用 %s\n", legacyEnvDir, EnvDir)
+		})
 		return d
 	}
 	return ""
 }
+
+var warnLegacyEnvOnce sync.Once
 
 const (
 	DefaultBaseURL            = "https://wxxyshall.usts.edu.cn"
