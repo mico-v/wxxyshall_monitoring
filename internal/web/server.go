@@ -136,16 +136,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/recharges", s.limitReadings(s.handleRechargeEvents))
 	mux.HandleFunc("GET /api/power", s.limitReadings(s.handlePowerSeries))
 	mux.HandleFunc("GET /api/config", s.handleGetConfig)
-	mux.HandleFunc("POST /api/config", s.requireAdmin(s.handleSaveConfig))
+	// 单宿舍添加在 allow_public_add_target=true 时允许无密钥提交；
+	// 其余配置写入始终要求管理密钥，由 handler 内部区分。
+	mux.HandleFunc("POST /api/config", s.handleSaveConfig)
 	mux.HandleFunc("POST /api/collect", s.requireAdmin(s.handleCollect))
 	mux.HandleFunc("POST /api/collect-all", s.requireAdmin(s.handleCollectAll))
 	mux.HandleFunc("GET /api/collect-all/status", s.requireAdmin(s.handleCollectStatus))
 	mux.HandleFunc("POST /api/collect-all/cancel", s.requireAdmin(s.handleCollectCancel))
-	mux.HandleFunc("GET /api/campuses", s.requireAdmin(s.handleDiscover))
-	mux.HandleFunc("GET /api/buildings", s.requireAdmin(s.handleDiscover))
-	mux.HandleFunc("GET /api/rooms", s.requireAdmin(s.handleDiscover))
+	mux.HandleFunc("GET /api/campuses", s.handleDiscover)
+	mux.HandleFunc("GET /api/buildings", s.handleDiscover)
+	mux.HandleFunc("GET /api/rooms", s.handleDiscover)
 	mux.HandleFunc("POST /api/token", s.requireAdmin(s.handlePushToken))
-	// 密钥校验始终严格执行；即使管理接口鉴权关闭，隐藏主页仍用它解锁。
+	// 密钥校验始终严格执行。
 	mux.HandleFunc("POST /api/admin/verify", s.requireAdminKey(s.handleAdminVerify))
 
 	// 静态文件
@@ -170,7 +172,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		s.handle404(w, r)
 		return
 	}
-	s.serveWebApp(w, s.cfgHub.Config().IsHomepageShown())
+	s.serveWebApp(w)
 }
 
 func (s *Server) handleRoom(w http.ResponseWriter, r *http.Request) {
@@ -191,8 +193,8 @@ func (s *Server) handleRoom(w http.ResponseWriter, r *http.Request) {
 		s.serve404(w)
 		return
 	}
-	// 单宿舍页面始终公开加载；show_homepage 只控制返回主页入口和聚合数据。
-	s.serveWebApp(w, true)
+	// 单宿舍页面始终公开加载。
+	s.serveWebApp(w)
 }
 
 // ---- API 处理器 ----
@@ -266,9 +268,9 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "宿舍不存在或未公开"})
 			return
 		}
-	} else if !s.cfgHub.Config().IsHomepageShown() && !s.checkAdminKey(r) {
+	} else if !s.checkAdminKey(r) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="elec-home"`)
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "主页已隐藏，需要管理密钥"})
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "聚合实时数据需要管理密钥"})
 		return
 	}
 	flusher, ok := w.(http.Flusher)
@@ -369,17 +371,17 @@ func parseRoomQuery(r *http.Request) (days int, campus, building, room, errMsg s
 	return days, campus, building, room, ""
 }
 
-// requireAggregateAccess 校验聚合(无房间过滤)数据的可见性。
-// 主页隐藏且未登录时以 401 拒绝;返回 false 表示已写出响应。
+// requireAggregateAccess 校验聚合(无房间过滤)数据始终需要管理密钥。
+// 返回 false 表示已写出响应。
 func (s *Server) requireAggregateAccess(w http.ResponseWriter, r *http.Request, campus string) bool {
 	if campus != "" {
 		return true
 	}
-	if s.cfgHub.Config().IsHomepageShown() || s.checkAdminKey(r) {
+	if s.checkAdminKey(r) {
 		return true
 	}
 	w.Header().Set("WWW-Authenticate", `Bearer realm="elec-home"`)
-	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "主页已隐藏，需要管理密钥"})
+	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "聚合数据需要管理密钥"})
 	return false
 }
 
@@ -570,7 +572,12 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "管理密钥无效"})
 		return
 	}
-	managementView := keyAuthorized || (!cfg.AdminAuthEnabled && r.URL.Query().Get("admin") == "1")
+	managementView := r.URL.Query().Get("admin") == "1"
+	if managementView && !keyAuthorized {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="elec-admin"`)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "管理密钥无效"})
+		return
+	}
 	campus, building, room := r.URL.Query().Get("campus"), r.URL.Query().Get("building"), r.URL.Query().Get("room")
 	if len(campus) > 128 || len(building) > 128 || len(room) > 128 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "campus/building/room 参数过长"})
@@ -586,30 +593,25 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "campus/building/room 必须同时提供"})
 		return
 	}
-	publicTargets := apiTargets(cfg.GetWebTargets(), false)
-	if !cfg.IsHomepageShown() && !managementView {
-		publicTargets = nil
-		if roomFilters == 3 {
-			for _, target := range cfg.GetWebTargets() {
-				if target.Campus == campus && target.Building == building && target.Room == room {
-					publicTargets = apiTargets([]config.Target{target}, false)
-					break
-				}
+
+	var publicTargets []config.Target
+	if keyAuthorized {
+		publicTargets = apiTargets(cfg.GetWebTargets(), false)
+	}
+	if roomFilters == 3 {
+		for _, target := range cfg.GetWebTargets() {
+			if target.Campus == campus && target.Building == building && target.Room == room {
+				publicTargets = apiTargets([]config.Target{target}, false)
+				break
 			}
 		}
 	}
 	out := map[string]any{
-		"targets":             publicTargets,
-		"defaults":            map[string]int{"feeitemid": config.DefaultFeeItemID, "appId": config.DefaultAppID},
-		"admin_auth_required": cfg.AdminAuthEnabled,
-		"show_homepage":       cfg.IsHomepageShown(),
-		// 采集按钮显隐策略：always / when_logged_in / never。
-		// 前端结合 admin_auth_required 与登录态决定是否渲染「立即采集」。
-		"show_collect_button": cfg.ShowCollectButton,
-		// 前端唯一需要的"未登录能否添加宿舍"判据：管理鉴权开启时任何人添加都要密钥。
-		"guest_add_allowed": s.guestAddAllowed(cfg),
+		"allow_public_add_target": cfg.IsPublicAddAllowed(),
+		"targets":                 publicTargets,
+		"defaults":                map[string]int{"feeitemid": config.DefaultFeeItemID, "appId": config.DefaultAppID},
 	}
-	if roomFilters == 3 && (!cfg.AdminAuthEnabled || managementView) {
+	if roomFilters == 3 && (cfg.IsPublicAddAllowed() || keyAuthorized) {
 		exists, hidden := false, false
 		key := campus + "|" + building + "|" + room
 		for _, target := range cfg.GetTargets() {
@@ -629,9 +631,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		out["base_url"] = cfg.BaseURL
 		out["poll_interval_minutes"] = cfg.PollIntervalMin
 		out["rate_limit_per_minute"] = cfg.RateLimitPerMinute
-		out["admin_auth_enabled"] = cfg.AdminAuthEnabled
-		out["show_homepage"] = cfg.IsHomepageShown()
-		out["show_collect_button"] = cfg.ShowCollectButton
+		out["allow_public_add_target"] = cfg.IsPublicAddAllowed()
 		out["webhook"] = map[string]any{
 			"enabled":               cfg.Webhook.Enabled,
 			"url":                   cfg.Webhook.URL,
@@ -647,29 +647,37 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Username           *string             `json:"username"`
-		Port               *int                `json:"port"`
-		BaseURL            *string             `json:"base_url"`
-		Targets            *[]config.Target    `json:"targets"`
-		Target             *config.Target      `json:"target"`
-		PollIntervalMin    *int                `json:"poll_interval_minutes"`
-		RateLimitPerMinute *int                `json:"rate_limit_per_minute"`
-		AdminAuthEnabled   *bool               `json:"admin_auth_enabled"`
-		ShowHomepage       *bool               `json:"show_homepage"`
-		ShowCollectButton  *string             `json:"show_collect_button"`
-		Webhook            *webhookConfigPatch `json:"webhook"`
+		Username             *string             `json:"username"`
+		AllowPublicAddTarget *bool               `json:"allow_public_add_target"`
+		Port                 *int                `json:"port"`
+		BaseURL              *string             `json:"base_url"`
+		Targets              *[]config.Target    `json:"targets"`
+		Target               *config.Target      `json:"target"`
+		PollIntervalMin      *int                `json:"poll_interval_minutes"`
+		RateLimitPerMinute   *int                `json:"rate_limit_per_minute"`
+		Webhook              *webhookConfigPatch `json:"webhook"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeJSON(w, jsonDecodeStatus(err), map[string]string{"error": "JSON 解析失败: " + err.Error()})
 		return
 	}
-	// 「添加宿舍」是网页唯一对外开放的配置写入路径，可由 allow_guest_add_target
-	// 单独收紧。admin_auth_enabled=true 时 requireAdmin 已拦下所有未鉴权请求，
-	// 这里只处理管理鉴权关闭、但运维不希望访客自行添加宿舍的部署。
-	if body.Target != nil && !s.checkAdminKey(r) && !s.cfgHub.Config().IsGuestAddAllowed() {
+	keyAuthorized := s.checkAdminKey(r)
+	publicTargetOnly := body.Target != nil &&
+		body.Username == nil && body.AllowPublicAddTarget == nil && body.Port == nil &&
+		body.BaseURL == nil && body.Targets == nil && body.PollIntervalMin == nil &&
+		body.RateLimitPerMinute == nil && body.Webhook == nil
+	if !keyAuthorized && !(publicTargetOnly && s.cfgHub.Config().IsPublicAddAllowed()) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="elec-admin"`)
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录，禁止添加宿舍"})
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "需要管理密钥"})
 		return
+	}
+	if !keyAuthorized {
+		// 公开添加只允许选择宿舍身份和显示名，不允许访客写入通知、
+		// webhook 或独立采集周期等管理字段。
+		body.Target.PollIntervalMin = nil
+		body.Target.NotifyMode = ""
+		body.Target.NotifyTime = ""
+		body.Target.Webhook = nil
 	}
 	if body.Port != nil && (*body.Port < 1024 || *body.Port > 65535) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "port 必须在 1024..65535 之间"})
@@ -687,14 +695,6 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rate_limit_per_minute 必须在 1..600 之间"})
 		return
 	}
-	if body.ShowCollectButton != nil {
-		switch strings.TrimSpace(*body.ShowCollectButton) {
-		case config.ShowCollectButtonAlways, config.ShowCollectButtonWhenLoggedIn, config.ShowCollectButtonNever:
-		default:
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "show_collect_button 必须是 always、when_logged_in 或 never"})
-			return
-		}
-	}
 	if body.Targets != nil {
 		for i, target := range *body.Targets {
 			if target.FeeItemID <= 0 || target.AppID <= 0 {
@@ -706,9 +706,9 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if body.Target != nil {
-		if body.Username != nil || body.Port != nil || body.BaseURL != nil || body.Targets != nil ||
+		if body.Username != nil || body.AllowPublicAddTarget != nil || body.Port != nil || body.BaseURL != nil || body.Targets != nil ||
 			body.PollIntervalMin != nil || body.RateLimitPerMinute != nil ||
-			body.AdminAuthEnabled != nil || body.ShowHomepage != nil || body.ShowCollectButton != nil || body.Webhook != nil {
+			body.Webhook != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target 不能与其他配置字段同时提交"})
 			return
 		}
@@ -773,6 +773,10 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		if body.Username != nil {
 			cfg.Username = *body.Username
 		}
+		if body.AllowPublicAddTarget != nil {
+			allowed := *body.AllowPublicAddTarget
+			cfg.AllowPublicAddTarget = &allowed
+		}
 		if body.Port != nil {
 			cfg.Port = *body.Port
 		}
@@ -801,16 +805,6 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.RateLimitPerMinute != nil {
 			cfg.RateLimitPerMinute = *body.RateLimitPerMinute
-		}
-		if body.AdminAuthEnabled != nil {
-			cfg.AdminAuthEnabled = *body.AdminAuthEnabled
-		}
-		if body.ShowHomepage != nil {
-			value := *body.ShowHomepage
-			cfg.ShowHomepage = &value
-		}
-		if body.ShowCollectButton != nil {
-			cfg.ShowCollectButton = strings.TrimSpace(*body.ShowCollectButton)
 		}
 		if body.Webhook != nil {
 			webhookCfg := cfg.Webhook
@@ -1055,6 +1049,11 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "配置不可用"})
 		return
 	}
+	if !cfg.IsPublicAddAllowed() && !s.checkAdminKey(r) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="elec-admin"`)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "宿舍发现需要管理密钥"})
+		return
+	}
 
 	q := r.URL.Query()
 	feeitemID := config.DefaultFeeItemID
@@ -1208,8 +1207,8 @@ func (s *Server) serveFile(filename, ctype string) http.HandlerFunc {
 	}
 }
 
-func (s *Server) serveWebApp(w http.ResponseWriter, homepageShown bool) {
-	s.serveSPAIndex(w, homepageShown)
+func (s *Server) serveWebApp(w http.ResponseWriter) {
+	s.serveSPAIndex(w)
 }
 
 func (s *Server) handle404(w http.ResponseWriter, r *http.Request) {
@@ -1240,10 +1239,6 @@ func (s *Server) serve404(w http.ResponseWriter) {
 
 func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.cfgHub.Config().AdminAuthEnabled {
-			next(w, r)
-			return
-		}
 		if !s.checkAdminKey(r) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="elec-admin"`)
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "管理密钥无效"})
@@ -1312,12 +1307,6 @@ func (s *Server) checkAdminKey(r *http.Request) bool {
 
 func adminCredentialProvided(r *http.Request) bool {
 	return r.Header.Get("Authorization") != "" || r.URL.Query().Has("key")
-}
-
-// guestAddAllowed 返回未登录访客能否添加宿舍。
-// 管理鉴权开启时一律为 false（requireAdmin 会拦下无密钥的写请求）。
-func (s *Server) guestAddAllowed(cfg *config.Config) bool {
-	return !cfg.AdminAuthEnabled && cfg.IsGuestAddAllowed()
 }
 
 // CloseSSE 关闭 SSE Hub，断开所有 SSE 客户端连接。

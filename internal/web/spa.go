@@ -1,7 +1,6 @@
 package web
 
 import (
-	"bytes"
 	"embed"
 	"io/fs"
 	"log/slog"
@@ -59,8 +58,8 @@ func (s *Server) handleSPAAsset(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-// serveSPAIndex 输出前端 index.html，并注入构建版本与首屏主页可见性。
-func (s *Server) serveSPAIndex(w http.ResponseWriter, homepageShown bool) {
+// serveSPAIndex 输出前端 index.html，并注入构建版本。
+func (s *Server) serveSPAIndex(w http.ResponseWriter) {
 	data, err := readDistFile("index.html")
 	if err != nil {
 		// 回退到磁盘（本地开发时直接替换 dist 目录的场景）。
@@ -70,17 +69,7 @@ func (s *Server) serveSPAIndex(w http.ResponseWriter, homepageShown bool) {
 			return
 		}
 	}
-	value := "true"
-	if !homepageShown {
-		value = "false"
-	}
 	data = injectVersion(data)
-	data = bytes.Replace(
-		data,
-		[]byte(`<body data-show-homepage="true">`),
-		[]byte(`<body data-show-homepage="`+value+`">`),
-		1,
-	)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.Header().Set("Cache-Control", "no-cache")

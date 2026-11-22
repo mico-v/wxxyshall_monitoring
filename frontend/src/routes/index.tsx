@@ -18,19 +18,23 @@ function HomePage() {
   const navigate = indexRoute.useNavigate();
   const { picker } = useApp();
 
+  if (picker) {
+    return (
+      <div className={PAGE_CONTAINER_CLASSES}>
+        <HomePicker />
+      </div>
+    );
+  }
+
   return (
     <div className={PAGE_CONTAINER_CLASSES}>
-      {picker ? (
-        <HomePicker />
-      ) : (
-        <Dashboard
-          room={null}
-          days={days ?? 0}
-          onDaysChange={(next) =>
-            void navigate({ search: (prev) => ({ ...prev, days: next }), replace: true })
-          }
-        />
-      )}
+      <Dashboard
+        room={null}
+        days={days ?? 0}
+        onDaysChange={(next) =>
+          void navigate({ search: (prev) => ({ ...prev, days: next }), replace: true })
+        }
+      />
     </div>
   );
 }

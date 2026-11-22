@@ -240,51 +240,60 @@ export function RoomPicker({ defaults, guestMode, onAdded, onStatus }: RoomPicke
   return (
     <section>
       <h3 className="mb-2 text-xs font-semibold text-muted-foreground">添加宿舍(电费)</h3>
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_1fr_auto]">
-        <Select
-          aria-label="选择校区"
-          value={campus?.value ?? ''}
-          disabled={loadingCampuses}
-          onChange={(event) => void onCampusChange(event.target.value)}
-        >
-          <option value="">{loadingCampuses ? '— 加载校区 —' : '— 选择校区 —'}</option>
-          {campuses.map((c) => (
-            <option key={c.value} value={c.value}>
-              {c.name}
-            </option>
-          ))}
-        </Select>
-        <Select
-          aria-label="选择楼栋"
-          value={building?.value ?? ''}
-          disabled={!campus || buildings.length === 0}
-          onChange={(event) => void onBuildingChange(event.target.value)}
-        >
-          <option value="">— 选择楼栋 —</option>
-          {buildings.map((b) => (
-            <option key={b.value} value={b.value}>
-              {b.name}
-            </option>
-          ))}
-        </Select>
-        <Select
-          aria-label="选择房间"
-          value={room?.value ?? ''}
-          disabled={!building || rooms.length === 0}
-          onChange={(event) => onRoomChange(event.target.value)}
-        >
-          <option value="">— 选择房间 —</option>
-          {rooms.map((r) => (
-            <option key={r.value} value={r.value}>
-              {r.name}
-            </option>
-          ))}
-        </Select>
-        <Button onClick={() => void addTarget()} disabled={!canSubmit}>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_1fr_auto] lg:items-end">
+        <div className="space-y-1.5">
+          <Label htmlFor="pick-campus">校区</Label>
+          <Select
+            id="pick-campus"
+            value={campus?.value ?? ''}
+            disabled={loadingCampuses}
+            onChange={(event) => void onCampusChange(event.target.value)}
+          >
+            <option value="">{loadingCampuses ? '加载中…' : '选择校区'}</option>
+            {campuses.map((c) => (
+              <option key={c.value} value={c.value}>
+                {c.name}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="pick-building">楼栋</Label>
+          <Select
+            id="pick-building"
+            value={building?.value ?? ''}
+            disabled={!campus || buildings.length === 0}
+            onChange={(event) => void onBuildingChange(event.target.value)}
+          >
+            <option value="">选择楼栋</option>
+            {buildings.map((b) => (
+              <option key={b.value} value={b.value}>
+                {b.name}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="pick-room">房间</Label>
+          <Select
+            id="pick-room"
+            value={room?.value ?? ''}
+            disabled={!building || rooms.length === 0}
+            onChange={(event) => onRoomChange(event.target.value)}
+          >
+            <option value="">选择房间</option>
+            {rooms.map((r) => (
+              <option key={r.value} value={r.value}>
+                {r.name}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <Button className="h-10 w-full lg:w-auto" onClick={() => void addTarget()} disabled={!canSubmit}>
           {lookup.exists && !lookup.hidden ? '查看宿舍' : '添加'}
         </Button>
       </div>
-      <div className="mt-3 flex items-center gap-2">
+      <div className="mt-3 grid gap-1.5 sm:grid-cols-[auto_minmax(0,1fr)] sm:items-center">
         <Label htmlFor="pick-tag" className="shrink-0">
           宿舍 tag / 别名
         </Label>

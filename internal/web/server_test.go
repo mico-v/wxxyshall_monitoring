@@ -24,11 +24,12 @@ func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	root := t.TempDir()
 	t.Setenv(config.EnvDir, root)
+	allowPublic := true
 	cfg := &config.Config{
 		Username: "20260001", Port: 8080, BaseURL: config.DefaultBaseURL,
 		PollIntervalMin: 60, RateLimitPerMinute: 30,
-		AdminAuthEnabled: true,
-		Targets:          []config.Target{{FeeItemID: 409, AppID: 34, Campus: "A", Building: "B", Room: "C", Label: "one"}},
+		AllowPublicAddTarget: &allowPublic,
+		Targets:              []config.Target{{FeeItemID: 409, AppID: 34, Campus: "A", Building: "B", Room: "C", Label: "one"}},
 	}
 	if err := config.SaveConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -63,6 +64,12 @@ func TestConfigAPIProtectsFullConfigurationAndMutations(t *testing.T) {
 	}
 	if _, ok := publicBody["targets"]; !ok {
 		t.Fatal("public config omitted targets")
+	}
+	if got := publicBody["allow_public_add_target"]; got != true {
+		t.Fatalf("public add policy = %#v, want true", got)
+	}
+	if publicBody["targets"] != nil {
+		t.Fatalf("unauthenticated config should not list all targets: %#v", publicBody["targets"])
 	}
 	invalidGet := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
@@ -178,7 +185,7 @@ func TestConfigAPIRedactsTargetWebhookToken(t *testing.T) {
 	}
 
 	public := httptest.NewRecorder()
-	server.Handler().ServeHTTP(public, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	server.Handler().ServeHTTP(public, httptest.NewRequest(http.MethodGet, "/api/config?campus=A&building=B&room=C", nil))
 	// 公开视图允许出现 "webhook": null（表示该宿舍继承全局 webhook），
 	// 但绝不能泄露任何 webhook 配置数据。
 	if strings.Contains(public.Body.String(), "room-secret") || strings.Contains(public.Body.String(), "room.test") {
@@ -237,6 +244,7 @@ func TestAddTargetWritesFullConfigFile(t *testing.T) {
 	}
 	out := string(data)
 	for _, key := range []string{
+		`"allow_public_add_target": true`,
 		`"campus": "X"`, `"building": "Y"`, `"room": "Z"`,
 		`"label": "X/Y/Z"`, `"show_in_web": true`, `"poll_interval_minutes": 60`,
 		`"notify_mode": ""`, `"notify_time": ""`, `"webhook": null`,
@@ -267,22 +275,16 @@ func TestAdminKeyAcceptedFromQueryParameter(t *testing.T) {
 	}
 }
 
-func TestAdminAuthCanBeDisabledButKeyVerificationRemainsStrict(t *testing.T) {
+func TestManagementAlwaysRequiresAdminKey(t *testing.T) {
 	server := newTestServer(t)
-	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
-		cfg.AdminAuthEnabled = false
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
 	handler := server.Handler()
 
 	mutation := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"rate_limit_per_minute":45}`))
 	req.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(mutation, req)
-	if mutation.Code != http.StatusOK {
-		t.Fatalf("auth-disabled mutation status = %d body=%s", mutation.Code, mutation.Body.String())
+	if mutation.Code != http.StatusUnauthorized {
+		t.Fatalf("keyless mutation status = %d body=%s", mutation.Code, mutation.Body.String())
 	}
 
 	verify := httptest.NewRecorder()
@@ -292,25 +294,14 @@ func TestAdminAuthCanBeDisabledButKeyVerificationRemainsStrict(t *testing.T) {
 	}
 }
 
-func TestHiddenHomepageRequiresKeyForAggregateDataButKeepsRoomPublic(t *testing.T) {
+func TestAggregateDataRequiresKeyButRoomDataRemainsPublic(t *testing.T) {
 	server := newTestServer(t)
-	hidden := false
-	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
-		cfg.ShowHomepage = &hidden
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
 	handler := server.Handler()
 
 	root := httptest.NewRecorder()
 	handler.ServeHTTP(root, httptest.NewRequest(http.MethodGet, "/", nil))
-	if root.Code != http.StatusOK || !strings.Contains(root.Body.String(), `data-show-homepage="false"`) {
-		t.Fatalf("hidden homepage shell status=%d marker=%v", root.Code, strings.Contains(root.Body.String(), `data-show-homepage="false"`))
-	}
-	// SPA 始终返回同一个 index.html，首屏可见性通过 data-show-homepage 提示前端。
-	if !strings.Contains(root.Body.String(), `<div id="root">`) {
-		t.Fatal("hidden homepage shell omitted the SPA root")
+	if root.Code != http.StatusOK || !strings.Contains(root.Body.String(), `<div id="root">`) {
+		t.Fatalf("homepage shell status=%d", root.Code)
 	}
 
 	aggregate := httptest.NewRecorder()
@@ -338,7 +329,7 @@ func TestHiddenHomepageRequiresKeyForAggregateDataButKeepsRoomPublic(t *testing.
 		t.Fatalf("aggregate events status = %d, want 401", events.Code)
 	}
 
-	// 新增的聚合端点与 readings 共享可见性策略:聚合需密钥,单宿舍公开。
+	// 聚合端点一律需要密钥，单宿舍公开。
 	for _, ep := range []string{"/api/daily", "/api/recharges", "/api/power"} {
 		aggregate := httptest.NewRecorder()
 		handler.ServeHTTP(aggregate, httptest.NewRequest(http.MethodGet, ep, nil))
@@ -366,7 +357,7 @@ func TestHiddenTargetExcludedFromPublicConfigAndRoomPage(t *testing.T) {
 	}
 
 	public := httptest.NewRecorder()
-	server.Handler().ServeHTTP(public, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	server.Handler().ServeHTTP(public, httptest.NewRequest(http.MethodGet, "/api/config?campus=A&building=B&room=C", nil))
 	var publicBody struct {
 		Targets []config.Target `json:"targets"`
 	}
@@ -378,7 +369,7 @@ func TestHiddenTargetExcludedFromPublicConfigAndRoomPage(t *testing.T) {
 	}
 
 	admin := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/config?admin=1", nil)
 	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
 	server.Handler().ServeHTTP(admin, req)
 	var adminBody struct {
@@ -432,13 +423,6 @@ func TestConfigAPIScopedTargetLookupAndHiddenTargetUnhide(t *testing.T) {
 		t.Fatalf("missing lookup = %d %#v", status, body)
 	}
 
-	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
-		cfg.AdminAuthEnabled = false
-		cfg.ShowHomepage = &hidden
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
 	status, body := lookup("/api/config?campus=X&building=Y&room=Z", "")
 	if status != http.StatusOK || body["target_exists"] != true || body["target_hidden"] != true {
 		t.Fatalf("hidden lookup = %d %#v", status, body)
@@ -470,8 +454,15 @@ func TestConfigAPIScopedTargetLookupAndHiddenTargetUnhide(t *testing.T) {
 	}
 }
 
-func TestConfigAPIUnauthenticatedScopedLookupOmitsMetadataWhenAdminAuthEnabled(t *testing.T) {
+func TestConfigAPIUnauthenticatedScopedLookupOmitsMetadataWhenPublicAddDisabled(t *testing.T) {
 	server := newTestServer(t)
+	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
+		deny := false
+		cfg.AllowPublicAddTarget = &deny
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	partial := httptest.NewRecorder()
 	server.Handler().ServeHTTP(partial, httptest.NewRequest(http.MethodGet, "/api/config?campus=A", nil))
 	if partial.Code != http.StatusBadRequest {
@@ -495,7 +486,7 @@ func TestConfigAPIUnauthenticatedScopedLookupOmitsMetadataWhenAdminAuthEnabled(t
 	}
 }
 
-func TestConfigAPIReportsGuestAddPolicy(t *testing.T) {
+func TestConfigAPIReportsPublicAddPolicy(t *testing.T) {
 	server := newTestServer(t)
 	handler := server.Handler()
 	readPolicy := func() bool {
@@ -509,93 +500,67 @@ func TestConfigAPIReportsGuestAddPolicy(t *testing.T) {
 		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
 			t.Fatal(err)
 		}
-		allowed, ok := body["guest_add_allowed"].(bool)
+		allowed, ok := body["allow_public_add_target"].(bool)
 		if !ok {
-			t.Fatalf("guest_add_allowed missing from public config: %s", recorder.Body.String())
+			t.Fatalf("allow_public_add_target missing from public config: %s", recorder.Body.String())
 		}
 		return allowed
 	}
 
-	if readPolicy() {
-		t.Fatal("admin_auth_enabled=true should disable guest additions")
-	}
-	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
-		cfg.AdminAuthEnabled = false
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
 	if !readPolicy() {
-		t.Fatal("admin auth off should allow guest additions by default")
+		t.Fatal("public additions should default to enabled")
 	}
-	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
-		deny := false
-		cfg.AllowGuestAdd = &deny
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if readPolicy() {
-		t.Fatal("allow_guest_add_target=false should disable guest additions")
-	}
-}
-
-func TestConfigAPIReportsCollectButtonPolicy(t *testing.T) {
-	server := newTestServer(t)
-	handler := server.Handler()
-	readPolicy := func() string {
-		t.Helper()
-		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/config", nil))
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("config status = %d", recorder.Code)
-		}
-		var body map[string]any
-		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
-			t.Fatal(err)
-		}
-		mode, ok := body["show_collect_button"].(string)
-		if !ok {
-			t.Fatalf("show_collect_button missing from public config: %s", recorder.Body.String())
-		}
-		return mode
-	}
-
-	if got := readPolicy(); got != config.ShowCollectButtonAlways {
-		t.Fatalf("default show_collect_button = %q, want %q", got, config.ShowCollectButtonAlways)
-	}
-
 	update := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"show_collect_button":"never"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"allow_public_add_target":false}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
 	handler.ServeHTTP(update, req)
 	if update.Code != http.StatusOK {
-		t.Fatalf("update show_collect_button status = %d body=%s", update.Code, update.Body.String())
+		t.Fatalf("disable public additions status = %d body=%s", update.Code, update.Body.String())
 	}
-	if got := readPolicy(); got != config.ShowCollectButtonNever {
-		t.Fatalf("show_collect_button = %q, want %q", got, config.ShowCollectButtonNever)
-	}
-
-	invalid := httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"show_collect_button":"sometimes"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
-	handler.ServeHTTP(invalid, req)
-	if invalid.Code != http.StatusBadRequest {
-		t.Fatalf("invalid show_collect_button status = %d, want 400", invalid.Code)
+	if readPolicy() {
+		t.Fatal("allow_public_add_target=false should disable public additions")
 	}
 }
 
-func TestGuestAddTargetPolicyRejectsKeylessAdditions(t *testing.T) {
+func TestPublicAddDisabledRequiresKeyForDiscoveryAndTargetAdd(t *testing.T) {
 	server := newTestServer(t)
 	handler := server.Handler()
 	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
-		cfg.AdminAuthEnabled = false
+		deny := false
+		cfg.AllowPublicAddTarget = &deny
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
+
+	discover := httptest.NewRecorder()
+	handler.ServeHTTP(discover, httptest.NewRequest(http.MethodGet, "/api/campuses", nil))
+	if discover.Code != http.StatusUnauthorized {
+		t.Fatalf("keyless discovery status = %d body=%s", discover.Code, discover.Body.String())
+	}
+
+	add := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"target":{"campus":"H","building":"I","room":"J"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(add, req)
+	if add.Code != http.StatusUnauthorized {
+		t.Fatalf("keyless add status = %d body=%s", add.Code, add.Body.String())
+	}
+
+	adminAdd := httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"target":{"campus":"H","building":"I","room":"J"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	handler.ServeHTTP(adminAdd, req)
+	if adminAdd.Code != http.StatusOK {
+		t.Fatalf("admin add status = %d body=%s", adminAdd.Code, adminAdd.Body.String())
+	}
+}
+
+func TestPublicAddTargetPolicyControlsKeylessAdditions(t *testing.T) {
+	server := newTestServer(t)
+	handler := server.Handler()
 	add := func(auth, room string) *httptest.ResponseRecorder {
 		t.Helper()
 		recorder := httptest.NewRecorder()
@@ -616,7 +581,7 @@ func TestGuestAddTargetPolicyRejectsKeylessAdditions(t *testing.T) {
 
 	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
 		deny := false
-		cfg.AllowGuestAdd = &deny
+		cfg.AllowPublicAddTarget = &deny
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -626,6 +591,26 @@ func TestGuestAddTargetPolicyRejectsKeylessAdditions(t *testing.T) {
 	}
 	if recorder := add("Bearer 0123456789abcdef", "J"); recorder.Code != http.StatusOK {
 		t.Fatalf("admin add with guest additions disabled = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPublicAddCannotSetAdminOnlyTargetFields(t *testing.T) {
+	server := newTestServer(t)
+	recorder := httptest.NewRecorder()
+	body := `{"target":{"campus":"P","building":"Q","room":"R","poll_interval_minutes":1,"notify_mode":"alert","webhook":{"enabled":false}}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("public add status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	targets := server.cfgHub.Config().Targets
+	added := targets[len(targets)-1]
+	if added.PollIntervalMin == nil || *added.PollIntervalMin != 60 {
+		t.Fatalf("public add changed poll interval: %+v", added.PollIntervalMin)
+	}
+	if added.NotifyMode != "" || added.NotifyTime != "" || added.Webhook != nil {
+		t.Fatalf("public add wrote admin-only fields: %+v", added)
 	}
 }
 
@@ -689,7 +674,7 @@ func TestSPAIsServedFromEmbeddedDist(t *testing.T) {
 		t.Fatalf("SPA index Content-Type = %q", ct)
 	}
 	body := recorder.Body.String()
-	for _, required := range []string{`<div id="root">`, `/assets/`, `/static/theme.js`, `data-show-homepage="true"`} {
+	for _, required := range []string{`<div id="root">`, `/assets/`, `/static/theme.js`} {
 		if !strings.Contains(body, required) {
 			t.Errorf("SPA index omitted %s", required)
 		}
@@ -822,7 +807,6 @@ func TestDiscoverServesProcessCacheWithoutToken(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/campuses", nil)
-	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
 	server.Handler().ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("cached discovery status = %d body=%s", recorder.Code, recorder.Body.String())
@@ -1182,7 +1166,9 @@ func TestAggregateReadingsOnlyIncludeConfiguredRooms(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/readings", nil))
+	req := httptest.NewRequest(http.MethodGet, "/api/readings", nil)
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("aggregate status = %d body=%s", rec.Code, rec.Body.String())
 	}

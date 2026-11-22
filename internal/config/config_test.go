@@ -125,7 +125,7 @@ func TestConfigDefaults(t *testing.T) {
 	}
 }
 
-func TestConfigNewDefaultsAndLegacyHomepageCompatibility(t *testing.T) {
+func TestConfigNewDefaults(t *testing.T) {
 	cfg, err := parseConfig([]byte(`{
   "username":"u","base_url":"https://example.com","targets":[],
   "poll_interval_minutes":60,"rate_limit_per_minute":30
@@ -136,90 +136,59 @@ func TestConfigNewDefaultsAndLegacyHomepageCompatibility(t *testing.T) {
 	if cfg.Port != 5009 {
 		t.Fatalf("default port = %d, want 5009", cfg.Port)
 	}
-	if cfg.AdminAuthEnabled {
-		t.Fatal("admin auth should default to disabled")
-	}
-	if !cfg.IsHomepageShown() {
-		t.Fatal("omitted show_homepage should default to true")
-	}
-	if !cfg.IsGuestAddAllowed() {
-		t.Fatal("omitted allow_guest_add_target should default to true")
+	if !cfg.IsPublicAddAllowed() {
+		t.Fatal("omitted allow_public_add_target should default to true")
 	}
 }
 
-func TestShowCollectButtonOption(t *testing.T) {
-	base := `{
-  "username":"u","base_url":"https://example.com","targets":[],
-  "poll_interval_minutes":60,"rate_limit_per_minute":30
-}`
-	cfg, err := parseConfig([]byte(base), "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.ShowCollectButton != ShowCollectButtonAlways {
-		t.Fatalf("omitted show_collect_button = %q, want %q", cfg.ShowCollectButton, ShowCollectButtonAlways)
-	}
-
-	for _, mode := range []string{ShowCollectButtonAlways, ShowCollectButtonWhenLoggedIn, ShowCollectButtonNever} {
-		raw := strings.Replace(base, "\"rate_limit_per_minute\":30", "\"rate_limit_per_minute\":30,\"show_collect_button\":\""+mode+"\"", 1)
-		parsed, err := parseConfig([]byte(raw), "test")
-		if err != nil {
-			t.Fatalf("mode %q should parse: %v", mode, err)
-		}
-		if parsed.ShowCollectButton != mode {
-			t.Fatalf("show_collect_button = %q, want %q", parsed.ShowCollectButton, mode)
-		}
-	}
-
-	invalid := strings.Replace(base, "\"rate_limit_per_minute\":30", "\"rate_limit_per_minute\":30,\"show_collect_button\":\"sometimes\"", 1)
-	if _, err := parseConfig([]byte(invalid), "test"); err == nil {
-		t.Fatal("invalid show_collect_button should be rejected")
-	}
-}
-
-func TestIsCollectButtonVisible(t *testing.T) {
-	always := &Config{ShowCollectButton: ShowCollectButtonAlways, AdminAuthEnabled: true}
-	if !always.IsCollectButtonVisible(false) {
-		t.Fatal("always should be visible to guests")
-	}
-
-	never := &Config{ShowCollectButton: ShowCollectButtonNever, AdminAuthEnabled: false}
-	if never.IsCollectButtonVisible(true) {
-		t.Fatal("never should stay hidden")
-	}
-
-	loggedIn := &Config{ShowCollectButton: ShowCollectButtonWhenLoggedIn, AdminAuthEnabled: true}
-	if loggedIn.IsCollectButtonVisible(false) {
-		t.Fatal("when_logged_in should hide for guests while admin auth is on")
-	}
-	if !loggedIn.IsCollectButtonVisible(true) {
-		t.Fatal("when_logged_in should show for authenticated users")
-	}
-
-	// 管理鉴权关闭时，所有人视为已登录。
-	open := &Config{ShowCollectButton: ShowCollectButtonWhenLoggedIn, AdminAuthEnabled: false}
-	if !open.IsCollectButtonVisible(false) {
-		t.Fatal("when_logged_in should count everyone as logged in without admin auth")
-	}
-}
-
-func TestGuestAddTargetOption(t *testing.T) {
+func TestLegacyAccessConfigMigration(t *testing.T) {
 	cfg, err := parseConfig([]byte(`{
   "username":"u","base_url":"https://example.com","targets":[],
   "poll_interval_minutes":60,"rate_limit_per_minute":30,
-  "allow_guest_add_target":false
+  "mode":"server","show_homepage":false,"allow_guest_add_target":true,
+  "admin_auth_enabled":false,"show_collect_button":"never"
 }`), "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.IsGuestAddAllowed() {
-		t.Fatal("allow_guest_add_target=false should disable guest additions")
+	if !cfg.IsPublicAddAllowed() {
+		t.Fatal("legacy public homepage configuration should migrate to public additions enabled")
 	}
-	if clone := cfg.Clone(); clone.IsGuestAddAllowed() {
-		t.Fatal("Clone should keep the guest-add setting")
+}
+
+func TestLegacyVisibleHomepageDoesNotOpenPublicAdds(t *testing.T) {
+	cfg, err := parseConfig([]byte(`{
+  "username":"u","base_url":"https://example.com","targets":[],
+  "poll_interval_minutes":60,"rate_limit_per_minute":30,
+  "show_homepage":true,"allow_guest_add_target":true,
+  "admin_auth_enabled":false
+}`), "test")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if cfg.AllowGuestAdd == cfg.Clone().AllowGuestAdd {
-		t.Fatal("Clone should deep-copy the guest-add pointer")
+	if cfg.IsPublicAddAllowed() {
+		t.Fatal("legacy public aggregate homepage should not enable public additions")
+	}
+}
+
+func TestPublicAddTargetOption(t *testing.T) {
+	cfg, err := parseConfig([]byte(`{
+  "username":"u","base_url":"https://example.com","targets":[],
+  "poll_interval_minutes":60,"rate_limit_per_minute":30,
+  "allow_public_add_target":false
+}`), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.IsPublicAddAllowed() {
+		t.Fatal("allow_public_add_target=false should disable public additions")
+	}
+	clone := cfg.Clone()
+	if clone.IsPublicAddAllowed() {
+		t.Fatal("Clone should keep the public-add setting")
+	}
+	if cfg.AllowPublicAddTarget == clone.AllowPublicAddTarget {
+		t.Fatal("Clone should deep-copy the public-add pointer")
 	}
 }
 
@@ -319,6 +288,7 @@ func TestSaveConfigWritesAllTargetFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, key := range []string{
+		`"allow_public_add_target": true`,
 		`"feeitemid": 409`, `"appId": 34`,
 		`"campus": "A"`, `"building": "B"`, `"room": "C"`,
 		`"label": "A/B/C"`, `"show_in_web": true`, `"poll_interval_minutes": 60`,
@@ -326,6 +296,14 @@ func TestSaveConfigWritesAllTargetFields(t *testing.T) {
 	} {
 		if !strings.Contains(string(data), key) {
 			t.Fatalf("config.json missing %s:\n%s", key, data)
+		}
+	}
+	for _, removed := range []string{
+		`"mode"`, `"show_homepage"`, `"allow_guest_add_target"`,
+		`"admin_auth_enabled"`, `"show_collect_button"`,
+	} {
+		if strings.Contains(string(data), removed) {
+			t.Fatalf("config.json still contains removed field %s:\n%s", removed, data)
 		}
 	}
 }

@@ -10,22 +10,19 @@ import { useApp } from '@/lib/app-context';
 import { PAGE_CONTAINER_CLASSES } from '@/lib/constants';
 
 export function PageHeader({ onOpenSettings }: { onOpenSettings: () => void }) {
-  const { picker, canAdd, showCollectButton } = useApp();
+  const { picker, showCollectButton } = useApp();
   const { hasKey, ensureKey, logout } = useAdmin();
   const { toast } = useToast();
   const [openingSettings, setOpeningSettings] = React.useState(false);
 
-  // 与旧版一致：无添加权限（未登录且禁访客添加）时先弹密钥验证，
-  // 校验通过或已有有效密钥才打开「查询设置」；取消则什么都不做。
+  // 「查询设置」始终是登录入口；校验通过或已有有效密钥后才打开设置。
   async function handleOpenSettings() {
     if (openingSettings) return;
-    if (!canAdd) {
-      setOpeningSettings(true);
-      try {
-        if (!(await ensureKey())) return;
-      } finally {
-        setOpeningSettings(false);
-      }
+    setOpeningSettings(true);
+    try {
+      if (!(await ensureKey())) return;
+    } finally {
+      setOpeningSettings(false);
     }
     onOpenSettings();
   }
@@ -41,20 +38,16 @@ export function PageHeader({ onOpenSettings }: { onOpenSettings: () => void }) {
         </Link>
 
         <div className="flex flex-wrap items-center gap-2">
-          {!picker && (
-            <>
-              {showCollectButton && <CollectButton />}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void handleOpenSettings()}
-                disabled={openingSettings}
-              >
-                <IconSettings />
-                查询设置
-              </Button>
-            </>
-          )}
+          {!picker && showCollectButton && <CollectButton />}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void handleOpenSettings()}
+            disabled={openingSettings}
+          >
+            <IconSettings />
+            查询设置
+          </Button>
           {hasKey && (
             <Button
               variant="ghost"

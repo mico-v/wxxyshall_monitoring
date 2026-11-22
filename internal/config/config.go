@@ -57,14 +57,6 @@ const (
 	DefaultWebhookThreshold   = 10.0
 	DefaultWebhookTemplate    = "【电费监控】{{label}} 当前余额：{{surplus_charge}}，采集时间：{{ts}}"
 	DefaultTargetNotifyTime   = "08:00"
-
-	// 采集按钮显示策略。
-	// always：所有访客始终可见；when_logged_in：仅登录用户可见，
-	// 但管理鉴权关闭时所有人视为已登录；never：始终隐藏。
-	ShowCollectButtonAlways       = "always"
-	ShowCollectButtonWhenLoggedIn = "when_logged_in"
-	ShowCollectButtonNever        = "never"
-	DefaultShowCollectButton      = ShowCollectButtonAlways
 )
 
 // Target 代表一个监控宿舍目标。
@@ -141,50 +133,21 @@ func (t Target) EffectiveWebhook(global WebhookConfig) WebhookConfig {
 // （Linux 监听所有地址，Windows/其它平台仅 127.0.0.1）。反向代理部署时建议设为
 // "127.0.0.1"，避免绕过 TLS 直接暴露明文端口。
 type Config struct {
-	Username           string        `json:"username"`
-	Port               int           `json:"port"`
-	Bind               string        `json:"bind,omitempty"` // 监听地址，空=平台默认
-	BaseURL            string        `json:"base_url"`
-	Targets            []Target      `json:"targets"`
-	PollIntervalMin    int           `json:"poll_interval_minutes"`
-	RateLimitPerMinute int           `json:"rate_limit_per_minute"`
-	AdminAuthEnabled   bool          `json:"admin_auth_enabled"`
-	ShowHomepage       *bool         `json:"show_homepage"`
-	AllowGuestAdd      *bool         `json:"allow_guest_add_target"`
-	ShowCollectButton  string        `json:"show_collect_button"`
-	Webhook            WebhookConfig `json:"webhook"`
+	Username             string        `json:"username"`
+	AllowPublicAddTarget *bool         `json:"allow_public_add_target"`
+	Port                 int           `json:"port"`
+	Bind                 string        `json:"bind,omitempty"` // 监听地址，空=平台默认
+	BaseURL              string        `json:"base_url"`
+	Targets              []Target      `json:"targets"`
+	PollIntervalMin      int           `json:"poll_interval_minutes"`
+	RateLimitPerMinute   int           `json:"rate_limit_per_minute"`
+	Webhook              WebhookConfig `json:"webhook"`
 }
 
-// IsCollectButtonVisible reports whether the "立即采集" button should be shown.
-// authenticated 表示访客是否已通过管理鉴权；当 AdminAuthEnabled 为 false 时，
-// 所有人视为已登录。未知/空值按默认策略 always 处理。
-func (c *Config) IsCollectButtonVisible(authenticated bool) bool {
-	if c == nil {
-		return true
-	}
-	switch c.ShowCollectButton {
-	case ShowCollectButtonNever:
-		return false
-	case ShowCollectButtonWhenLoggedIn:
-		return !c.AdminAuthEnabled || authenticated
-	default:
-		return true
-	}
-}
-
-// IsHomepageShown reports whether the aggregate homepage is publicly visible.
-// The pointer keeps older configuration files compatible: an omitted field defaults to true.
-func (c *Config) IsHomepageShown() bool {
-	return c == nil || c.ShowHomepage == nil || *c.ShowHomepage
-}
-
-// IsGuestAddAllowed reports whether a visitor without the admin key may add a
-// target. It only matters while AdminAuthEnabled is false: with admin auth on,
-// requireAdmin rejects every unauthenticated mutation regardless of this value.
-// The pointer keeps older configuration files compatible: omitted means true,
-// which is the behaviour before this field existed.
-func (c *Config) IsGuestAddAllowed() bool {
-	return c == nil || c.AllowGuestAdd == nil || *c.AllowGuestAdd
+// IsPublicAddAllowed reports whether visitors without the admin key may add a
+// target from the public homepage.
+func (c *Config) IsPublicAddAllowed() bool {
+	return c == nil || c.AllowPublicAddTarget == nil || *c.AllowPublicAddTarget
 }
 
 // Clone 返回可安全交给调用方修改的深拷贝。
@@ -194,13 +157,9 @@ func (c *Config) Clone() *Config {
 	}
 	cp := *c
 	cp.Targets = append([]Target(nil), c.Targets...)
-	if c.ShowHomepage != nil {
-		value := *c.ShowHomepage
-		cp.ShowHomepage = &value
-	}
-	if c.AllowGuestAdd != nil {
-		value := *c.AllowGuestAdd
-		cp.AllowGuestAdd = &value
+	if c.AllowPublicAddTarget != nil {
+		value := *c.AllowPublicAddTarget
+		cp.AllowPublicAddTarget = &value
 	}
 	cp.Webhook.Body = cloneJSONMap(c.Webhook.Body)
 	for i := range cp.Targets {
@@ -283,11 +242,43 @@ func LoadConfig() (*Config, error) {
 }
 
 func parseConfig(data []byte, source string) (*Config, error) {
-	// 兼容旧版本曾写入但从未生效的 admin_key；加载后不再保存该字段。
+	// 兼容旧版本的访问模式字段；迁移到 allow_public_add_target 后不再保存。
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err == nil {
-		if _, ok := raw["admin_key"]; ok {
-			delete(raw, "admin_key")
+		var legacy struct {
+			ShowHomepage     *bool `json:"show_homepage"`
+			AllowGuestAdd    *bool `json:"allow_guest_add_target"`
+			AdminAuthEnabled bool  `json:"admin_auth_enabled"`
+		}
+		_ = json.Unmarshal(data, &legacy)
+		_, hasPublicAdd := raw["allow_public_add_target"]
+		legacyKeys := []string{
+			"admin_key", "mode", "show_homepage", "allow_guest_add_target",
+			"admin_auth_enabled", "show_collect_button",
+		}
+		hadLegacy := false
+		hadLegacyAccess := false
+		for _, key := range legacyKeys {
+			if _, ok := raw[key]; ok {
+				hadLegacy = true
+				if key == "show_homepage" || key == "allow_guest_add_target" || key == "admin_auth_enabled" {
+					hadLegacyAccess = true
+				}
+				delete(raw, key)
+			}
+		}
+		if hadLegacy {
+			cleaned, marshalErr := json.Marshal(raw)
+			if marshalErr != nil {
+				return nil, fmt.Errorf("解析配置文件 %s 失败: %w", source, marshalErr)
+			}
+			data = cleaned
+		}
+		if !hasPublicAdd && hadLegacyAccess {
+			allowed := !legacy.AdminAuthEnabled &&
+				boolDefault(legacy.AllowGuestAdd, true) &&
+				!boolDefault(legacy.ShowHomepage, true)
+			raw["allow_public_add_target"], _ = json.Marshal(allowed)
 			cleaned, marshalErr := json.Marshal(raw)
 			if marshalErr != nil {
 				return nil, fmt.Errorf("解析配置文件 %s 失败: %w", source, marshalErr)
@@ -310,6 +301,13 @@ func parseConfig(data []byte, source string) (*Config, error) {
 		return nil, fmt.Errorf("配置文件 %s 无效: %w", source, err)
 	}
 	return &cfg, nil
+}
+
+func boolDefault(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }
 
 // SaveConfig 将配置写回 config.json。
@@ -424,9 +422,6 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.RateLimitPerMinute < 1 || cfg.RateLimitPerMinute > 600 {
 		return fmt.Errorf("rate_limit_per_minute 必须在 1..600 之间")
 	}
-	if cfg.ShowCollectButton != "" && !isValidCollectButtonMode(cfg.ShowCollectButton) {
-		return fmt.Errorf("show_collect_button 必须是 always、when_logged_in 或 never")
-	}
 	if err := validateWebhook(cfg.Webhook); err != nil {
 		return err
 	}
@@ -497,6 +492,10 @@ func validateBind(bind string) error {
 
 func normalizeConfig(cfg *Config) {
 	cfg.Username = strings.TrimSpace(cfg.Username)
+	if cfg.AllowPublicAddTarget == nil {
+		allowed := true
+		cfg.AllowPublicAddTarget = &allowed
+	}
 	cfg.Bind = strings.TrimSpace(cfg.Bind)
 	if cfg.Port == 0 {
 		cfg.Port = DefaultPort
@@ -510,18 +509,6 @@ func normalizeConfig(cfg *Config) {
 	}
 	if cfg.RateLimitPerMinute == 0 {
 		cfg.RateLimitPerMinute = DefaultRateLimitPerMinute
-	}
-	if cfg.ShowHomepage == nil {
-		shown := true
-		cfg.ShowHomepage = &shown
-	}
-	if cfg.AllowGuestAdd == nil {
-		allowed := true
-		cfg.AllowGuestAdd = &allowed
-	}
-	cfg.ShowCollectButton = strings.TrimSpace(cfg.ShowCollectButton)
-	if cfg.ShowCollectButton == "" {
-		cfg.ShowCollectButton = DefaultShowCollectButton
 	}
 	normalizeWebhook(&cfg.Webhook)
 	for i := range cfg.Targets {
@@ -584,15 +571,6 @@ func normalizeWebhook(webhook *WebhookConfig) {
 	}
 	if webhook.LowBalanceThreshold == 0 {
 		webhook.LowBalanceThreshold = DefaultWebhookThreshold
-	}
-}
-
-func isValidCollectButtonMode(mode string) bool {
-	switch mode {
-	case ShowCollectButtonAlways, ShowCollectButtonWhenLoggedIn, ShowCollectButtonNever:
-		return true
-	default:
-		return false
 	}
 }
 

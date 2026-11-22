@@ -15,8 +15,9 @@
 - 单宿舍读数明细默认每页 10 条，可切换每页数量并使用上一页/下一页浏览。
 - 仪表盘按 `config.json` 中的目标顺序显示和采集。网页“查询设置”只提供级联添加宿舍；其他字段、排序和已有宿舍调整统一手工编辑 `config.json`。
 - PWA 可安装，离线时使用最近缓存的公开配置和读数；管理请求和带鉴权请求绝不缓存。
-- 可通过 `admin_auth_enabled` 控制修改、采集、发现、任务状态/取消和 token 推送接口是否需要管理密钥；`allow_guest_add_target` 可单独禁止未登录访客添加宿舍。
-- `show_homepage=false` 时主页显示宿舍选择器而不是聚合数据，可跳转或添加宿舍；进入聚合数据需登录密钥，浏览器一次登录后长期保留。
+- 管理配置、采集、发现、token 推送和聚合数据固定需要管理密钥；未登录访客仍可查看单宿舍公开数据。
+- 未登录主页固定显示宿舍选择器；`allow_public_add_target=true` 时可直接添加新宿舍并跳转，登录后选择器隐藏，主页显示聚合列表，添加宿舍统一在「查询设置」完成。
+- 浏览器登录一次后长期保留密钥，可随时点「退出登录」；单宿舍页面和单宿舍数据始终公开。
 - 支持配置 webhook 通知；默认在监控宿舍余额首次进入低值区间时发送一次，余额恢复后重新触发。
 
 项目没有自动更新功能。升级由管理员替换二进制并重启服务完成。
@@ -125,7 +126,7 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
 
 GitHub Actions 位于 `.github/workflows/release.yml`。推送到 `main` 会构建并上传 Linux amd64/arm64、Windows amd64 工件；推送 `v*` 标签还会自动创建 GitHub Release 并附加压缩包。
 
-首次运行会生成 `$ELEC_DIR/data/config.json` 和 `$ELEC_DIR/data/.admin_key`。默认打开 `http://localhost:5009`；`admin_auth_enabled` 默认关闭，开启后进入“查询设置”需输入管理密钥。也可直接打开 `http://localhost:5009/?key=<管理密钥>`；网页读取后会把 `key` 从地址栏移除，并长期保存在本浏览器的 `localStorage` 中，可随时点「退出登录」清除。
+首次运行会生成 `$ELEC_DIR/data/config.json` 和 `$ELEC_DIR/data/.admin_key`。默认打开 `http://localhost:5009`；进入“查询设置”和查看聚合数据需要管理密钥。也可直接打开 `http://localhost:5009/?key=<管理密钥>`；网页读取后会把 `key` 从地址栏移除，并长期保存在本浏览器的 `localStorage` 中，可随时点「退出登录」清除。
 
 ### systemd 安装
 
@@ -158,6 +159,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 ```json
 {
   "username": "学号",
+  "allow_public_add_target": true,
   "port": 5009,
   "bind": "127.0.0.1",
   "base_url": "https://wxxyshall.usts.edu.cn",
@@ -186,10 +188,6 @@ elec config       # 显示密钥文件位置，不直接打印密钥
   ],
   "poll_interval_minutes": 60,
   "rate_limit_per_minute": 30,
-  "admin_auth_enabled": false,
-  "show_homepage": true,
-  "allow_guest_add_target": true,
-  "show_collect_button": "always",
   "webhook": {
     "enabled": false,
     "url": "http://127.0.0.1:9966/send",
@@ -207,14 +205,12 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 约束：
 
 - `username` 非空；`port` 为 `1024..65535`，与默认无特权 systemd 服务保持一致。
+- 访问模式固定为 server，不再提供 `mode`、`show_homepage`、`admin_auth_enabled` 或采集按钮策略配置。
+- `allow_public_add_target` 默认 `true`。开启时未登录主页显示宿舍选择器，可选择或公开添加宿舍并跳转；关闭后未登录主页只显示登录入口。登录后主页固定展示已存在宿舍列表，添加统一走「查询设置」。
 - `bind` 为监听地址（IP 或主机名），留空沿用平台默认（Linux 监听所有地址，Windows 仅 `127.0.0.1`）。放在 Caddy/Nginx 后面时设成 `"127.0.0.1"`，避免明文端口绕过反代。
 - `base_url` 必须是有效的 HTTP/HTTPS 地址。
 - `poll_interval_minutes` 为 `1..10080`。
 - `rate_limit_per_minute` 为 `1..600`。例如 `30` 表示任意两次学校 HTTP 请求至少间隔 2 秒，并非一分钟突发 30 次。
-- `admin_auth_enabled` 默认 `false`；开启后管理 API 需要密钥。无论是否开启，程序仍会生成 `.admin_key`，密钥验证接口也始终严格校验。
-- `show_homepage` 默认 `true`；关闭后未登录访客打开主页看到的是与单宿舍页「查询设置」一致的宿舍选择器（可跳转或添加宿舍），不显示聚合数据；已登录时主页直接显示聚合仪表盘，单宿舍页也不再显示返回主页按钮。
-- `allow_guest_add_target` 默认 `true`；仅在 `admin_auth_enabled=false` 时生效。设为 `false` 后，未登录访客不能添加宿舍（网页入口和 `POST /api/config` 都要求管理密钥），适合「主页隐藏 + 管理鉴权关闭」仍不希望访客自行添加宿舍的部署。
-- `show_collect_button` 默认 `always`，控制主页和单宿舍页「立即采集」按钮的显隐：`always` 所有访客可见，`when_logged_in` 仅已登录访客可见（`admin_auth_enabled=false` 时所有人视为已登录，仍然可见），`never` 始终隐藏。隐藏按钮不影响定时采集、Webhook 或采集 API。
 - 每个目标的 `feeitemid`、`appId` 必须为正整数，`campus/building/room` 非空且组合不可重复。
 - 目标的 `show_in_web` 可省略，默认 `true`；设为 `false` 后仍会定时/手动采集，但不会出现在公开配置、读数、宿舍页面或 SSE 中。
 - 目标的 `poll_interval_minutes` 可省略；省略时继承全局 `poll_interval_minutes`，设置后以该宿舍的 `1..10080` 分钟周期覆盖全局值。
@@ -226,12 +222,12 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 - `webhook.notify_mode` 支持 `low_balance`（默认，首次降至阈值时通知）、`balance_decrease`（余额较上一条降低时通知）和 `every_collection`（每次成功采集通知）。该字段主要用于兼容未设置宿舍 `notify_mode` 的旧配置；新配置使用宿舍的 `none`/`daily`/`alert`。`low_balance_threshold` 默认 `10`。
 - `webhook.body` 必须是 JSON 对象，支持嵌套对象和数组；其中字符串可使用 `{{label}}`、`{{campus}}`、`{{building}}`、`{{room}}`、`{{ts}}`、`{{surplus_charge}}`、`{{low_balance_threshold}}` 和 `{{total_usage}}` 占位符。旧版顶层 `umo` / `content_template` 配置会自动迁移到 `body`。
 
-网页“查询设置”仅显示已有宿舍，并允许通过校区→楼栋→房间级联添加宿舍；添加后自动保存。网页不编辑服务字段、目标字段和顺序，也不提供删除操作。需要修改、排序或删除时由管理员直接编辑 `config.json`，保存后会热重载。systemd 安装环境中请保持文件归属 `elec:elec`、权限 `0640`，数据目录不允许符号链接或特殊文件。
+网页“查询设置”登录后显示已有宿舍，并允许通过校区→楼栋→房间级联添加宿舍；添加后自动保存。未登录且 `allow_public_add_target=true` 时，主页显示相同选择器；选择已存在宿舍直接进入，新宿舍自动保存后跳转。网页不编辑服务字段、目标字段和顺序，也不提供删除操作。需要修改、排序或删除时由管理员直接编辑 `config.json`，保存后会热重载。systemd 安装环境中请保持文件归属 `elec:elec`、权限 `0640`，数据目录不允许符号链接或特殊文件。
 
 ## 安全边界
 
-- 管理密钥存放于数据目录的 `.admin_key`，服务启动时读取；不会写入 `config.json` 或 systemd unit，即使 `admin_auth_enabled=false` 也依然生成。
-- 浏览器把密钥长期保存在 `localStorage`，登录一次后无需重复输入，直到点「退出登录」；刷新或重开页面时若密钥仍有效，`show_homepage=false` 的主页也会直接进入聚合视图。启动时会校验一次，失效即刻清除。单宿舍仪表盘和读数保持公开；`show_homepage=false` 时聚合主页、聚合读数和聚合 SSE 需要密钥。
+- 管理密钥存放于数据目录的 `.admin_key`，服务启动时读取；不会写入 `config.json` 或 systemd unit。
+- 浏览器把密钥长期保存在 `localStorage`，登录一次后无需重复输入，直到点「退出登录」。启动时会校验一次，失效即刻清除。单宿舍仪表盘和读数保持公开；聚合主页、聚合读数和聚合 SSE 始终需要密钥。
 - 管理 API 使用 `Authorization: Bearer <key>`，也接受 `?key=<key>`。生产部署建议放在 HTTPS 反向代理后；查询参数可能出现在代理访问日志中，应限制日志访问并避免分享含密钥的原始链接。
 - JSON 请求限制为 1 MiB、拒绝未知字段和多余 JSON；配置、token 使用临时文件 + `fsync` + 原子替换保存。
 - 默认安装服务不以 root 运行，数据目录及敏感文件采用受限权限。
@@ -246,15 +242,16 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 |---|---|---|
 | GET | `/`, `/room/{campus}/{building}/{room}` | 仪表盘 |
 | GET | `/api/health` | 服务和数据库健康状态 |
-| GET | `/api/readings?days&campus&building&room` | 最新最多 10,000 条读数；隐藏主页时无宿舍参数的聚合查询需密钥 |
-| GET | `/api/config` | 目标顺序、默认 fee item/app ID；不暴露服务敏感配置 |
-| GET | `/api/events` | 新读数 SSE |
+| GET | `/api/readings?days&campus&building&room` | 最新最多 10,000 条读数；无宿舍参数的聚合查询需密钥 |
+| GET | `/api/config` | 公开添加策略、默认 fee item/app ID；登录后附带公开目标列表 |
+| GET | `/api/events` | 新读数 SSE；聚合连接需密钥，单宿舍连接公开 |
 
-`admin_auth_enabled=true` 时需要 Bearer 管理密钥（关闭时可直接调用，但 `/api/admin/verify` 始终需要正确密钥）：
+以下管理接口始终需要 Bearer 管理密钥：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET/POST | `/api/config` | 鉴权 GET 返回完整配置；POST 更新完整或部分字段 |
+| GET | `/api/config?admin=1` | 返回完整管理配置 |
+| POST | `/api/config` | 更新配置；`allow_public_add_target=true` 时允许无密钥单独提交 `{"target": {...}}` |
 | POST | `/api/collect` | 采集一间已配置宿舍 |
 | POST | `/api/collect-all` | 启动批量采集 |
 | GET | `/api/collect-all/status?job_id=...` | 查询任务快照 |
@@ -265,9 +262,9 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 
 接口字段约定：
 
-- `POST /api/config` 接受配置章节列出的顶层字段并支持部分更新；网页添加宿舍时也可单独提交 `{"target": {...}}`。新宿舍追加到列表末尾；重复宿舍只原位更新 `label`，保留其 `feeitemid`、`appId` 和顺序，不覆盖其他配置。`target` 不能与其他配置字段混用；未知字段或无效范围会返回 `400`。
+- `POST /api/config` 接受配置章节列出的顶层字段并支持部分更新；网页公开添加宿舍时只提交 `{"target": {...}}`。新宿舍追加到列表末尾；重复宿舍只原位更新 `label`，保留其 `feeitemid`、`appId` 和顺序，不覆盖其他配置。`target` 不能与其他配置字段混用；未知字段或无效范围会返回 `400`。
 - `POST /api/collect` 请求体为 `{"campus":"...","building":"...","room":"..."}`；三个字段必须同时提供且目标必须已配置。空对象表示采集配置第一项。
-- 发现接口使用查询参数 `feeitemid`、`appId`；楼栋接口另需 `campus`，房间接口另需 `campus`、`building`。这些请求不受 `rate_limit_per_minute` 限制；成功结果按 `base_url + feeitemid + appId + 层级参数` 缓存到当前进程，直到服务重启；相同并发请求会合并，错误不缓存，`base_url` 变化会使用新的缓存键。
+- 发现接口在 `allow_public_add_target=true` 时公开，否则需要管理密钥。接口使用查询参数 `feeitemid`、`appId`；楼栋接口另需 `campus`，房间接口另需 `campus`、`building`。这些请求不受 `rate_limit_per_minute` 限制；成功结果按 `base_url + feeitemid + appId + 层级参数` 缓存到当前进程，直到服务重启；相同并发请求会合并，错误不缓存，`base_url` 变化会使用新的缓存键。
 - 批量任务状态为 `queued`、`running`、`cancelling`、`cancelled`、`done` 或 `failed`。运行中状态只返回进度计数，终态返回完整 `results`；取消必须传启动接口返回的同一个 `job_id`。
 - `POST /api/token` 接受 `access_token`、可选 `refresh_token`、`expires_in`、`login_time`、`sno` 和 `source`，拒绝未知字段及过大的 token。
 

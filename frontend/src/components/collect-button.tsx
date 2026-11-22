@@ -30,7 +30,7 @@ function writeActiveJob(jobId: string): void {
 const TERMINAL = new Set(['done', 'failed', 'cancelled']);
 
 export function CollectButton() {
-  const { config, room, targets } = useApp();
+  const { room, targets } = useApp();
   const { adminFetch, ensureAdmin } = useAdmin();
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -135,7 +135,7 @@ export function CollectButton() {
   const handleCollect = React.useCallback(async () => {
     setBusy(true);
     try {
-      if (!(await ensureAdmin(config?.admin_auth_required === true))) return;
+      if (!(await ensureAdmin(true))) return;
       if (room) {
         const matched = targets.find(
           (t) => t.campus === room.campus && t.building === room.building && t.room === room.room,
@@ -158,12 +158,12 @@ export function CollectButton() {
     } finally {
       if (mounted.current) setBusy(false);
     }
-  }, [ensureAdmin, config, room, targets, toast, startCollectRoom, startCollectAll]);
+  }, [ensureAdmin, room, targets, toast, startCollectRoom, startCollectAll]);
 
   const handleCancel = React.useCallback(async () => {
     if (!activeJobId) return;
     try {
-      if (!(await ensureAdmin(config?.admin_auth_required === true))) return;
+      if (!(await ensureAdmin(true))) return;
       const response = await adminFetch(
         `/api/collect-all/cancel?job_id=${encodeURIComponent(activeJobId)}`,
         { method: 'POST' },
@@ -175,7 +175,7 @@ export function CollectButton() {
     } catch (error) {
       toast('取消失败: ' + (error as Error).message, true);
     }
-  }, [activeJobId, ensureAdmin, config, adminFetch, toast]);
+  }, [activeJobId, ensureAdmin, adminFetch, toast]);
 
   // 刷新页面后恢复未完成的批量任务。
   React.useEffect(() => {

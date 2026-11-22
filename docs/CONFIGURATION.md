@@ -5,6 +5,7 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
 ```json
 {
   "username": "学号",
+  "allow_public_add_target": true,
   "port": 5009,
   "bind": "127.0.0.1",
   "base_url": "https://wxxyshall.usts.edu.cn",
@@ -42,10 +43,6 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
   ],
   "poll_interval_minutes": 60,
   "rate_limit_per_minute": 30,
-  "admin_auth_enabled": false,
-  "show_homepage": true,
-  "allow_guest_add_target": true,
-  "show_collect_button": "always",
   "webhook": {
     "enabled": false,
     "url": "http://127.0.0.1:9966/send",
@@ -63,15 +60,12 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
 字段说明：
 
 - `username`：学号，不能为空；
+- `allow_public_add_target`：是否开放公开添加宿舍，默认 `true`。开启时未登录主页显示宿舍选择器，可公开添加并跳转；关闭后未登录主页只显示登录入口。登录后主页固定显示已有宿舍列表，添加宿舍统一从「查询设置」操作；
 - `port`：网页端口，范围 `1024..65535`；
 - `bind`：网页监听地址，可填 IP（含 IPv6）或主机名，端口仍由 `port` 指定。**留空即沿用平台默认**：Linux 监听所有地址（`0.0.0.0`），Windows/其它平台仅监听 `127.0.0.1`。用 Caddy/Nginx 反代时建议设为 `"127.0.0.1"`，否则明文端口会绕过反代直接暴露；写成 `"127.0.0.1:5009"` 这类带端口的格式会被拒绝（端口请用 `port`）；
 - `base_url`：学校服务地址，通常无需修改；
 - `poll_interval_minutes`：全局采集间隔，范围 `1..10080` 分钟；
 - `rate_limit_per_minute`：定时和手动电费采集的学校接口请求速率，范围 `1..600`；网页添加宿舍时使用的校区、楼栋、房间发现接口不受此项限制，由进程内缓存和并发合并管理；
-- `admin_auth_enabled`：管理接口是否要求管理密钥，默认 `false`。关闭时仍会生成和保留 `.admin_key`，且密钥校验接口 `/api/admin/verify` 始终严格验证；
-- `show_homepage`：是否公开显示全部宿舍主页，默认 `true`。设为 `false` 后，未登录访客打开主页看到的是一个与单宿舍页「查询设置」一致的宿舍选择器（可跳转或添加宿舍），看不到聚合数据；已登录（浏览器保存了有效管理密钥）时主页照常直接显示聚合仪表盘，无需重复输入密钥。单宿舍页不显示返回主页按钮。无论该开关如何取值，单宿舍页始终公开可访问；
-- `allow_guest_add_target`：未登录访客能否添加宿舍，默认 `true`（与旧版本行为一致）。仅在 `admin_auth_enabled=false` 时生效——管理鉴权开启时任何添加都需要密钥。设为 `false` 后，网页「添加宿舍」和 `POST /api/config` 的单宿舍添加都需要带管理密钥，否则返回 401；
-- `show_collect_button`：主页和单宿舍页「立即采集」按钮的显隐策略，默认 `always`。可选 `always`（所有访客始终可见）、`when_logged_in`（仅已登录访客可见；`admin_auth_enabled=false` 时所有人视为已登录，因此仍然可见）和 `never`（始终隐藏）。隐藏按钮不影响定时采集、Webhook 或采集 API；
 - `webhook`：采集通知配置。`enabled` 为 `true` 时向 `url` 发送 `webhook.body` 中定义的 JSON 对象，并使用 `Authorization: Bearer <token>` 鉴权。`body` 支持任意 JSON 字段、嵌套对象和数组；程序不会内置或追加 `content`、`umo` 等字段。每个成功采集的宿舍会按照自己的 `notify_mode` 决定是否发送。
 - `webhook.body` 中的字符串支持 `{{label}}`、`{{campus}}`、`{{building}}`、`{{room}}`、`{{ts}}`、`{{surplus_charge}}`、`{{low_balance_threshold}}`、`{{total_usage}}` 占位符，替换会递归应用到嵌套对象和数组。旧版顶层 `umo` / `content_template` 配置会自动迁移到 `body`。
 - `webhook.notify_mode` 及 `low_balance_threshold` 为全局 webhook 的兼容配置；宿舍未设置 `notify_mode` 时，仍可使用 `low_balance`、`balance_decrease` 或 `every_collection` 规则。新配置建议使用宿舍级 `notify_mode`。
@@ -85,4 +79,4 @@ Linux 默认路径为 `/opt/elec/data/config.json`；Windows 默认路径为 `%L
 - 目标的 `notify_time`：每日通知时间，使用 `HH:MM` 格式，仅 `daily` 模式使用；省略时默认为 `08:00`。每日通知按宿舍分别去重，发送失败会在下次成功采集时重试。
 - 目标的 `webhook`：可选的完整 webhook 覆盖配置。省略时使用全局 `webhook`；配置后覆盖该宿舍的 `enabled`、`url`、`token`、阈值和 `body` 等设置。设置 `webhook.enabled=false` 可单独关闭该宿舍通知。
 
-配置和 token 支持热重载。webhook、宿舍、主页/鉴权开关、访客添加开关、显示开关、采集间隔和限流修改后约两秒生效；端口变化需要重启。webhook 消息发送成功和失败都会记录日志，但不会使本次采集失败。
+配置和 token 支持热重载。公开添加开关、webhook、宿舍、显示开关、采集间隔和限流修改后约两秒生效；端口变化需要重启。管理接口和聚合数据固定需要管理密钥，不提供关闭鉴权的配置。webhook 消息发送成功和失败都会记录日志，但不会使本次采集失败。

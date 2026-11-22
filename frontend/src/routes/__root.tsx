@@ -26,15 +26,11 @@ function RootLayout() {
     if (error?.status === 401 && adminKey) setKey('');
   }, [configQuery.error, adminKey, setKey]);
 
-  const aggregate = !!room || config?.show_homepage !== false || verified;
+  const aggregate = !!room || verified;
   const picker = !room && !aggregate;
 
-  // 采集按钮策略：always 始终显示；when_logged_in 仅登录后显示，但管理鉴权
-  // 关闭时所有人视为已登录；never 始终隐藏。配置缺失时回退为显示，兼容旧服务。
-  const collectMode = config?.show_collect_button ?? 'always';
-  const showCollectButton =
-    collectMode === 'always' ||
-    (collectMode === 'when_logged_in' && (config?.admin_auth_required === false || verified));
+  // 立即采集只对已登录管理员显示。
+  const showCollectButton = verified;
 
   const value = React.useMemo<AppContextValue>(
     () => ({
@@ -42,14 +38,14 @@ function RootLayout() {
       config,
       aggregate,
       picker,
-      canAdd: verified || config?.guest_add_allowed === true,
+      canAdd: verified || config?.allow_public_add_target === true,
       showCollectButton,
       targets: config?.targets ?? [],
     }),
     [room, config, aggregate, picker, verified, showCollectButton],
   );
 
-  // 主页需要配置来判定 show_homepage；宿舍页数据公开，可先渲染。
+  // 主页需要配置来判定公开添加；宿舍页数据公开，可先渲染。
   const waitingForConfig = !room && !config && configQuery.isLoading;
 
   return (

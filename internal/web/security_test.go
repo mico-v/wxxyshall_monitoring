@@ -120,7 +120,9 @@ func TestReadingsPerIPRateLimit(t *testing.T) {
 
 	allow := func() bool {
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/readings", nil))
+		req := httptest.NewRequest(http.MethodGet, "/api/readings", nil)
+		req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+		handler.ServeHTTP(rec, req)
 		switch rec.Code {
 		case http.StatusOK:
 			return true
@@ -148,6 +150,7 @@ func TestReadingsPerIPRateLimit(t *testing.T) {
 	// 不同 IP 不受影响
 	req := httptest.NewRequest(http.MethodGet, "/api/readings", nil)
 	req.Header.Set("X-Forwarded-For", "198.51.100.7")
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -179,7 +182,9 @@ func TestReadingsSemaphoreQuickFailsWhenFull(t *testing.T) {
 	// 其后的请求应快速失败为 503，而不是排队拖慢整个连接池
 	start := time.Now()
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/readings?days=7", nil))
+	req := httptest.NewRequest(http.MethodGet, "/api/readings?days=7", nil)
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("busy status = %d body=%s, want 503", rec.Code, rec.Body.String())
 	}
@@ -193,7 +198,9 @@ func TestReadingsSemaphoreQuickFailsWhenFull(t *testing.T) {
 	// 释放一个槽位后应恢复
 	<-server.readingsSem
 	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/readings?days=7", nil))
+	req = httptest.NewRequest(http.MethodGet, "/api/readings?days=7", nil)
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("after release status = %d, want 200", rec.Code)
 	}
@@ -242,6 +249,7 @@ func startSSE(t *testing.T, server *Server, remoteAddr string) (*statusRecorder,
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
 	req.RemoteAddr = remoteAddr
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
 	rec := &statusRecorder{ResponseWriter: httptest.NewRecorder()}
 	done := make(chan struct{})
 	go func() {

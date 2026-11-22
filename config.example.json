@@ -1,15 +1,12 @@
 {
   "username": "填写学号",
+  "allow_public_add_target": true,
   "port": 5009,
   "bind": "127.0.0.1",
   "base_url": "https://wxxyshall.usts.edu.cn",
   "targets": [],
   "poll_interval_minutes": 60,
   "rate_limit_per_minute": 30,
-  "admin_auth_enabled": false,
-  "show_homepage": true,
-  "allow_guest_add_target": true,
-  "show_collect_button": "always",
   "webhook": {
     "enabled": false,
     "url": "",

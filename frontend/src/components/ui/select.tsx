@@ -6,13 +6,9 @@ export function Select({ className, children, ...props }: React.ComponentProps<'
   return (
     <select
       className={cn(
-        'flex h-9 w-full min-w-0 appearance-none rounded-md border border-input bg-background bg-[length:16px] bg-[right_0.5rem_center] bg-no-repeat px-3 py-1 pr-8 text-sm shadow-xs transition-colors outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50',
+        'select-control flex h-10 w-full min-w-0 cursor-pointer rounded-md border border-input bg-card px-3 py-1 pr-9 text-sm font-medium text-foreground shadow-xs transition-[border-color,box-shadow,background-color] outline-none hover:border-ring/70 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:bg-muted/50 disabled:font-normal disabled:opacity-70',
         className,
       )}
-      style={{
-        backgroundImage:
-          "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E\")",
-      }}
       {...props}
     >
       {children}
