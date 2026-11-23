@@ -85,7 +85,7 @@ def push_token(server_url: str, tok: dict, admin_key_file: str | None) -> None:
     if not key:
         key = url_key
     if not key:
-        print("[x] 需要管理密钥：使用 --admin-key-file、ADMIN_KEY，或在 --push URL 后添加 ?key=...")
+        print("[x] 需要管理密钥：推荐使用 --admin-key-file 或 ADMIN_KEY；?key=... 仅为兼容旧调用")
         sys.exit(1)
 
     clean_query = urlencode([(name, value) for name, value in query_items if name != "key"])

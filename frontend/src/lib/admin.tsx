@@ -54,12 +54,17 @@ function loadStoredKey(): string {
   return '';
 }
 
-/** 允许 /?key=... 直接打开管理页面，读取后立即从地址栏移除。 */
+/** 允许 /#key=... 直接打开管理页面，读取后立即从地址栏移除。 */
 function consumeUrlKey(): string {
   try {
     const url = new URL(window.location.href);
-    const fromUrl = url.searchParams.get('key');
+    const hash = url.hash.startsWith('#') ? url.hash.slice(1) : url.hash;
+    const hashParams = new URLSearchParams(hash);
+    const fromHash = hashParams.get('key');
+    const fromQuery = url.searchParams.get('key');
+    const fromUrl = fromHash || fromQuery;
     if (fromUrl && fromUrl.trim()) {
+      if (fromHash) url.hash = '';
       url.searchParams.delete('key');
       window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
       return fromUrl.trim();

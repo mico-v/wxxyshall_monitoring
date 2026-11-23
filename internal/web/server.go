@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mico-v/wxxyshall-monitoring/internal/auth"
 	"github.com/mico-v/wxxyshall-monitoring/internal/charge"
@@ -51,25 +52,44 @@ const (
 	// healthCacheTTL: /api/health 的数据库探活结果缓存时间，
 	// 避免公开的健康检查接口反复占用共享 SQLite 连接池。
 	healthCacheTTL = 3 * time.Second
+
+	// 公开写入和学校发现接口的滥用保护。公开添加入口允许访客使用，
+	// 但必须限制单 IP 频率、全局上游并发和目标总量，避免小水管被拖垮。
+	publicAddPerMinuteLimit    = 6
+	publicAddBurstLimit        = 3
+	discoveryPerMinuteLimit    = 60
+	discoveryBurstLimit        = 20
+	adminVerifyPerMinuteLimit  = 20
+	adminVerifyBurstLimit      = 5
+	maxConcurrentDiscovery     = 4
+	maxPublicTargets           = 200
+	maxPublicTargetLabelLength = 80
 )
 
 var errDiscoveryTokenMissing = errors.New("discovery token missing")
+var errPublicTargetExists = errors.New("public target already exists")
+var errPublicTargetLimit = errors.New("public target limit reached")
 
 // Server 是 HTTP 服务器的主结构体。
 type Server struct {
-	cfgHub          *config.Hub
-	database        *db.DB
-	collector       *collector.Service
-	discovery       *discoveryCache
-	hub             *SSEHub
-	jobMgr          *JobManager
-	adminKey        string
-	rootDir         string
-	ctx             context.Context
-	cancel          context.CancelFunc
-	readingsLimiter *ipLimiter    // 公开 /api/readings 的每 IP 限流
-	readingsSem     chan struct{} // 公开 /api/readings 的全局并发信号量
-	health          healthTTL     // 健康检查结果缓存
+	cfgHub             *config.Hub
+	database           *db.DB
+	collector          *collector.Service
+	discovery          *discoveryCache
+	hub                *SSEHub
+	jobMgr             *JobManager
+	adminKey           string
+	rootDir            string
+	ctx                context.Context
+	cancel             context.CancelFunc
+	readingsLimiter    *ipLimiter    // 公开 /api/readings 的每 IP 限流
+	readingsSem        chan struct{} // 公开 /api/readings 的全局并发信号量
+	publicAddLimiter   *ipLimiter
+	discoveryLimiter   *ipLimiter
+	adminVerifyLimiter *ipLimiter
+	rateLogLimiter     *ipLimiter
+	discoverySem       chan struct{}
+	health             healthTTL // 健康检查结果缓存
 }
 
 type webhookConfigPatch struct {
@@ -98,18 +118,23 @@ func NewServer(hub *config.Hub, dbPath, adminKey, rootDir string) (*Server, erro
 	serverCtx, cancel := context.WithCancel(context.Background())
 
 	s := &Server{
-		cfgHub:          hub,
-		database:        database,
-		collector:       collector.New(hub, database),
-		discovery:       newDiscoveryCache(maxDiscoveryCacheEntries),
-		hub:             sseHub,
-		jobMgr:          NewJobManager(),
-		adminKey:        adminKey,
-		rootDir:         rootDir,
-		ctx:             serverCtx,
-		cancel:          cancel,
-		readingsLimiter: newIPLimiter(readingsPerMinuteLimit, readingsBurstLimit),
-		readingsSem:     make(chan struct{}, maxConcurrentReadings),
+		cfgHub:             hub,
+		database:           database,
+		collector:          collector.New(hub, database),
+		discovery:          newDiscoveryCache(maxDiscoveryCacheEntries),
+		hub:                sseHub,
+		jobMgr:             NewJobManager(),
+		adminKey:           adminKey,
+		rootDir:            rootDir,
+		ctx:                serverCtx,
+		cancel:             cancel,
+		readingsLimiter:    newIPLimiter(readingsPerMinuteLimit, readingsBurstLimit),
+		readingsSem:        make(chan struct{}, maxConcurrentReadings),
+		publicAddLimiter:   newIPLimiter(publicAddPerMinuteLimit, publicAddBurstLimit),
+		discoveryLimiter:   newIPLimiter(discoveryPerMinuteLimit, discoveryBurstLimit),
+		adminVerifyLimiter: newIPLimiter(adminVerifyPerMinuteLimit, adminVerifyBurstLimit),
+		rateLogLimiter:     newIPLimiter(1, 1),
+		discoverySem:       make(chan struct{}, maxConcurrentDiscovery),
 	}
 	s.collector.SetReadingHandler(func(event collector.ReadingEvent) {
 		if event.Target.IsShownInWeb() {
@@ -148,7 +173,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/rooms", s.handleDiscover)
 	mux.HandleFunc("POST /api/token", s.requireAdmin(s.handlePushToken))
 	// 密钥校验始终严格执行。
-	mux.HandleFunc("POST /api/admin/verify", s.requireAdminKey(s.handleAdminVerify))
+	mux.HandleFunc("POST /api/admin/verify", s.limitAdminVerify(s.requireAdminKey(s.handleAdminVerify)))
 
 	// 静态文件
 	mux.HandleFunc("GET /assets/", s.handleSPAAsset)
@@ -616,6 +641,9 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		key := campus + "|" + building + "|" + room
 		for _, target := range cfg.GetTargets() {
 			if target.Key() == key {
+				if !keyAuthorized && !target.IsShownInWeb() {
+					break
+				}
 				exists = true
 				hidden = !target.IsShownInWeb()
 				break
@@ -672,12 +700,25 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !keyAuthorized {
+		if !s.publicAddLimiter.Allow(clientIP(r)) {
+			w.Header().Set("Retry-After", "10")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "公开添加过于频繁，请稍后再试"})
+			return
+		}
 		// 公开添加只允许选择宿舍身份和显示名，不允许访客写入通知、
 		// webhook 或独立采集周期等管理字段。
+		body.Target.FeeItemID = config.DefaultFeeItemID
+		body.Target.AppID = config.DefaultAppID
+		showInWeb := true
+		body.Target.ShowInWeb = &showInWeb
 		body.Target.PollIntervalMin = nil
 		body.Target.NotifyMode = ""
 		body.Target.NotifyTime = ""
 		body.Target.Webhook = nil
+		if utf8.RuneCountInString(strings.TrimSpace(body.Target.Label)) > maxPublicTargetLabelLength {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "宿舍显示名过长"})
+			return
+		}
 	}
 	if body.Port != nil && (*body.Port < 1024 || *body.Port > 65535) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "port 必须在 1024..65535 之间"})
@@ -744,6 +785,9 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 			target := *body.Target
 			for i, old := range cfg.Targets {
 				if old.Key() == target.Key() {
+					if !keyAuthorized {
+						return errPublicTargetExists
+					}
 					cfg.Targets[i].Label = target.Label
 					if target.ShowInWeb != nil {
 						cfg.Targets[i].ShowInWeb = target.ShowInWeb
@@ -766,6 +810,9 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 					}
 					return nil
 				}
+			}
+			if !keyAuthorized && len(cfg.Targets) >= maxPublicTargets {
+				return errPublicTargetLimit
 			}
 			cfg.Targets = append(cfg.Targets, target)
 			return nil
@@ -831,6 +878,15 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, errPublicTargetExists) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "宿舍已存在，不能通过公开入口修改"})
+			return
+		}
+		if errors.Is(err, errPublicTargetLimit) {
+			w.Header().Set("Retry-After", "3600")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "公开宿舍数量已达到上限"})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "保存配置失败: " + err.Error()})
 		return
 	}
@@ -1049,10 +1105,18 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "配置不可用"})
 		return
 	}
-	if !cfg.IsPublicAddAllowed() && !s.checkAdminKey(r) {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="elec-admin"`)
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "宿舍发现需要管理密钥"})
-		return
+	keyAuthorized := s.checkAdminKey(r)
+	if !keyAuthorized {
+		if !cfg.IsPublicAddAllowed() {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="elec-admin"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "宿舍发现需要管理密钥"})
+			return
+		}
+		if !s.discoveryLimiter.Allow(clientIP(r)) {
+			w.Header().Set("Retry-After", "10")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "宿舍查询过于频繁，请稍后再试"})
+			return
+		}
 	}
 
 	q := r.URL.Query()
@@ -1073,6 +1137,10 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		appID = parsed
+	}
+	if !keyAuthorized && (feeitemID != config.DefaultFeeItemID || appID != config.DefaultAppID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "公开查询只能使用默认电费项目"})
+		return
 	}
 
 	var kind, campus, building string
@@ -1102,6 +1170,16 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 	key := discoveryCacheKey{
 		baseURL: cfg.BaseURL, feeItemID: feeitemID, appID: appID,
 		kind: kind, campus: campus, building: building,
+	}
+	select {
+	case s.discoverySem <- struct{}{}:
+		defer func() { <-s.discoverySem }()
+	case <-time.After(250 * time.Millisecond):
+		w.Header().Set("Retry-After", "2")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "宿舍查询繁忙，请稍后重试"})
+		return
+	case <-r.Context().Done():
+		return
 	}
 	opts, cached, err := s.discovery.Get(r.Context(), key, func(ctx context.Context) ([]charge.Option, error) {
 		tok := s.cfgHub.Token()
@@ -1237,6 +1315,17 @@ func (s *Server) serve404(w http.ResponseWriter) {
 
 // ---- 中间件/辅助 ----
 
+func (s *Server) limitAdminVerify(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.adminVerifyLimiter.Allow(clientIP(r)) {
+			w.Header().Set("Retry-After", "10")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "登录尝试过于频繁，请稍后再试"})
+			return
+		}
+		next(w, r)
+	}
+}
+
 func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.checkAdminKey(r) {
@@ -1267,8 +1356,10 @@ func (s *Server) limitReadings(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
 		if s.readingsLimiter != nil && !s.readingsLimiter.Allow(ip) {
-			// 命中限流时记录来源与路径，便于事后排查突发/共用出口 IP 的问题。
-			slog.Warn("公开数据接口限流", "ip", ip, "path", r.URL.Path)
+			// 每个来源最多每分钟记录一次，避免攻击流量把 journal 刷满。
+			if s.rateLogLimiter.Allow(ip) {
+				slog.Warn("公开数据接口限流", "ip", ip, "path", r.URL.Path)
+			}
 			w.Header().Set("Retry-After", "5")
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "请求过于频繁，请稍后再试"})
 			return
@@ -1645,7 +1736,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		slog.Error("JSON 序列化失败", "err", err)
+		// 客户端主动断开时写响应会报 broken pipe；这属于正常网络行为，
+		// 降为 Debug 可避免攻击者通过大量断开连接刷 journal。
+		slog.Debug("JSON 响应写入失败", "err", err)
 	}
 }
 

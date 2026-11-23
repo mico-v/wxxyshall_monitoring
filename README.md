@@ -39,10 +39,6 @@ python3 login.py
 ADMIN_KEY='<管理密钥>' python3 login.py \
   --push https://elec.example.edu.cn --push-only
 
-# 也可把密钥直接放在推送 URL 中
-python3 login.py \
-  --push 'https://elec.example.edu.cn/?key=<管理密钥>' --push-only
-
 # 也可从文件读取密钥，避免出现在 shell 历史和进程环境中
 python3 login.py --push https://elec.example.edu.cn --push-only \
   --admin-key-file /opt/elec/data/.admin_key
@@ -126,7 +122,7 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
 
 GitHub Actions 位于 `.github/workflows/release.yml`。推送到 `main` 会构建并上传 Linux amd64/arm64、Windows amd64 工件；推送 `v*` 标签还会自动创建 GitHub Release 并附加压缩包。
 
-首次运行会生成 `$ELEC_DIR/data/config.json` 和 `$ELEC_DIR/data/.admin_key`。默认打开 `http://localhost:5009`；进入“查询设置”和查看聚合数据需要管理密钥。也可直接打开 `http://localhost:5009/?key=<管理密钥>`；网页读取后会把 `key` 从地址栏移除，并长期保存在本浏览器的 `localStorage` 中，可随时点「退出登录」清除。
+首次运行会生成 `$ELEC_DIR/data/config.json` 和 `$ELEC_DIR/data/.admin_key`。默认打开 `http://localhost:5009`；进入“查询设置”和查看聚合数据需要管理密钥。也可直接打开 `http://localhost:5009/#key=<管理密钥>`；网页读取后会把 `key` 从地址栏移除，并长期保存在本浏览器的 `localStorage` 中，可随时点「退出登录」清除。片段参数不会发送到服务器或反向代理日志。
 
 ### systemd 安装
 
@@ -228,7 +224,10 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 
 - 管理密钥存放于数据目录的 `.admin_key`，服务启动时读取；不会写入 `config.json` 或 systemd unit。
 - 浏览器把密钥长期保存在 `localStorage`，登录一次后无需重复输入，直到点「退出登录」。启动时会校验一次，失效即刻清除。单宿舍仪表盘和读数保持公开；聚合主页、聚合读数和聚合 SSE 始终需要密钥。
-- 管理 API 使用 `Authorization: Bearer <key>`，也接受 `?key=<key>`。生产部署建议放在 HTTPS 反向代理后；查询参数可能出现在代理访问日志中，应限制日志访问并避免分享含密钥的原始链接。
+- 管理 API 使用 `Authorization: Bearer <key>`。服务端仍兼容 `?key=<key>`，但查询参数会出现在代理访问日志中；浏览器登录应使用 `/#key=<key>`，自动化调用应使用 Authorization 头。
+- 公开添加限制为每 IP 每分钟 6 次、突发 3 次，宿舍总数最多 200 间；访客只能新增公开宿舍，不能改名、解除隐藏或写入通知/Webhook/独立采集周期。
+- 公开校区发现限制为每 IP 每分钟 60 次、突发 20 次，且全局最多同时请求学校接口 4 次；公开请求只能使用默认电费项目 ID。
+- systemd 安装以无登录权限的 `elec` 用户运行，限制内存 512 MiB、任务数 128，并启用 `NoNewPrivileges`、只读系统目录、私有 `/tmp` 和设备隔离等沙箱选项。
 - JSON 请求限制为 1 MiB、拒绝未知字段和多余 JSON；配置、token 使用临时文件 + `fsync` + 原子替换保存。
 - 默认安装服务不以 root 运行，数据目录及敏感文件采用受限权限。
 - 历史记录没有删除 API 或自动清理任务；请自行备份整个数据目录。

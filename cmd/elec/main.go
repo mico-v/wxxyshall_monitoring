@@ -225,23 +225,35 @@ Environment="ELEC_DIR=%s"
 Environment="TZ=Asia/Shanghai"
 ExecStart=%s/elec run
 Restart=always
-RestartSec=30
-UMask=0027
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
 ReadWritePaths=%s
+ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
 RestrictSUIDSGID=true
 RestrictRealtime=true
+RestrictNamespaces=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=
 AmbientCapabilities=
+LimitNOFILE=4096
+TasksMax=128
+MemoryHigh=384M
+MemoryMax=512M
+CPUQuota=150%%
 StandardOutput=journal
 StandardError=journal
 

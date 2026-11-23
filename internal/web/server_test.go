@@ -389,7 +389,7 @@ func TestHiddenTargetExcludedFromPublicConfigAndRoomPage(t *testing.T) {
 	}
 }
 
-func TestConfigAPIScopedTargetLookupAndHiddenTargetUnhide(t *testing.T) {
+func TestConfigAPIScopedTargetLookupAndHiddenTargetRequiresAdmin(t *testing.T) {
 	server := newTestServer(t)
 	hidden := false
 	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
@@ -424,7 +424,7 @@ func TestConfigAPIScopedTargetLookupAndHiddenTargetUnhide(t *testing.T) {
 	}
 
 	status, body := lookup("/api/config?campus=X&building=Y&room=Z", "")
-	if status != http.StatusOK || body["target_exists"] != true || body["target_hidden"] != true {
+	if status != http.StatusOK || body["target_exists"] != false || body["target_hidden"] != false {
 		t.Fatalf("hidden lookup = %d %#v", status, body)
 	}
 	if _, ok := body["username"]; ok {
@@ -435,8 +435,20 @@ func TestConfigAPIScopedTargetLookupAndHiddenTargetUnhide(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"target":{"campus":"X","building":"Y","room":"Z","show_in_web":true}}`))
 	req.Header.Set("Content-Type", "application/json")
 	server.Handler().ServeHTTP(unhide, req)
+	if unhide.Code != http.StatusConflict {
+		t.Fatalf("public unhide status = %d body=%s", unhide.Code, unhide.Body.String())
+	}
+	if server.cfgHub.Config().Targets[1].IsShownInWeb() {
+		t.Fatal("public request must not unhide a target")
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"target":{"campus":"X","building":"Y","room":"Z","show_in_web":true}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	unhide = httptest.NewRecorder()
+	server.Handler().ServeHTTP(unhide, req)
 	if unhide.Code != http.StatusOK {
-		t.Fatalf("unhide status = %d body=%s", unhide.Code, unhide.Body.String())
+		t.Fatalf("admin unhide status = %d body=%s", unhide.Code, unhide.Body.String())
 	}
 	cfg := server.cfgHub.Config()
 	if len(cfg.Targets) != 2 || !cfg.Targets[1].IsShownInWeb() {
@@ -591,6 +603,67 @@ func TestPublicAddTargetPolicyControlsKeylessAdditions(t *testing.T) {
 	}
 	if recorder := add("Bearer 0123456789abcdef", "J"); recorder.Code != http.StatusOK {
 		t.Fatalf("admin add with guest additions disabled = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPublicAddCannotRenameExistingTarget(t *testing.T) {
+	server := newTestServer(t)
+	recorder := httptest.NewRecorder()
+	body := `{"target":{"campus":"A","building":"B","room":"C","label":"changed"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("public duplicate status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := server.cfgHub.Config().Targets[0].Label; got != "one" {
+		t.Fatalf("public duplicate changed label to %q", got)
+	}
+}
+
+func TestPublicAddRateLimit(t *testing.T) {
+	server := newTestServer(t)
+	handler := server.Handler()
+	for i := 0; i < publicAddBurstLimit; i++ {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"target":{"campus":"","building":"","room":""}}`))
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("attempt %d status = %d body=%s", i, recorder.Code, recorder.Body.String())
+		}
+	}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"target":{"campus":"","building":"","room":""}}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusTooManyRequests || recorder.Header().Get("Retry-After") == "" {
+		t.Fatalf("rate limited status = %d headers=%v body=%s", recorder.Code, recorder.Header(), recorder.Body.String())
+	}
+}
+
+func TestPublicAddTargetLimit(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
+		cfg.Targets = nil
+		for i := 0; i < maxPublicTargets; i++ {
+			cfg.Targets = append(cfg.Targets, config.Target{
+				Campus: "C", Building: "B", Room: fmt.Sprintf("R%d", i),
+			})
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"target":{"campus":"C","building":"B","room":"overflow"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("target limit status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := len(server.cfgHub.Config().Targets); got != maxPublicTargets {
+		t.Fatalf("target count = %d, want %d", got, maxPublicTargets)
 	}
 }
 
@@ -828,6 +901,49 @@ func TestDiscoverServesProcessCacheWithoutToken(t *testing.T) {
 	server.Handler().ServeHTTP(miss, req)
 	if miss.Code != http.StatusUnauthorized {
 		t.Fatalf("uncached discovery without token status = %d body=%s", miss.Code, miss.Body.String())
+	}
+}
+
+func TestPublicDiscoveryRateLimitAndDefaultProjectOnly(t *testing.T) {
+	server := newTestServer(t)
+	handler := server.Handler()
+
+	for i := 0; i < discoveryBurstLimit; i++ {
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/buildings?campus=probe-%d", i), nil))
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("probe %d status = %d body=%s", i, recorder.Code, recorder.Body.String())
+		}
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/buildings?campus=limited", nil))
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("discovery rate limit status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	server = newTestServer(t)
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/campuses?feeitemid=1", nil))
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("public custom project status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAdminVerifyRateLimit(t *testing.T) {
+	server := newTestServer(t)
+	for i := 0; i < adminVerifyBurstLimit; i++ {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/verify?key=0000000000000000", nil)
+		server.Handler().ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d", i, recorder.Code)
+		}
+	}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/verify?key=0000000000000000", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("verify rate limit status = %d", recorder.Code)
 	}
 }
 
