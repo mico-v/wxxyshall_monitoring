@@ -26,9 +26,15 @@
 
 再次双击任意位置的 `elec.exe` 不会启动第二个服务，而是打开已经运行的仪表盘。
 
-## 获取并推送登录 Token
+## 登录学校账号
 
-压缩包中的 `login.py` 需要 Python 3、Playwright、requests 和 Chrome/Edge：
+打开仪表盘，进入「查询设置 → 学校账号」，输入学号和密码即可获取 token。该流程只使用 `elec.exe` 和学校网络，不需要安装 Python、Playwright 或额外的 Chromium。服务端会按学校本次安全键盘的可见键位替换表转换密码；密码只在本次请求中使用，不会保存到磁盘或日志。
+
+登录成功后页面会显示 token 剩余有效期。token 通常约 70 天有效，过期后在同一位置重新登录即可。
+
+## 命令行备用方式
+
+无法使用网页登录时，压缩包中的 `login.py` 仍可通过本地浏览器获取并推送 token。只有这条备用路径需要 Python 3、Playwright、requests 和 Chrome/Edge：
 
 ```powershell
 pip install playwright requests
@@ -39,7 +45,7 @@ $key = (Get-Content (Join-Path $root 'data\.admin_key') -Raw).Trim()
 python .\login.py --push "http://127.0.0.1:5009/?key=$key" --push-only
 ```
 
-登录成功后，token 会直接推送给后台程序。通常只需在 token 到期前重新执行。
+登录成功后，token 会直接推送给后台程序。通常只需在 token 到期前重新执行；网页登录与命令行推送二选一即可。
 
 ## 修改配置
 

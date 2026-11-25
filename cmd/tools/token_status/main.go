@@ -18,7 +18,7 @@ func main() {
 		log.Fatalf("读取 token 失败: %v", err)
 	}
 	if tok == nil || tok.AccessToken == "" {
-		log.Fatalf("未找到 token.json，请先运行 python login.py")
+		log.Fatalf("未找到 token.json，请在网页「查询设置 → 学校账号」登录")
 	}
 
 	fmt.Printf("学号(sno)      : %s\n", tok.Sno)
@@ -35,9 +35,9 @@ func main() {
 		fmt.Printf("过期时间       : %s（约 %.1f 天后）\n", exp.Format("2006-01-02 15:04:05"), *left/86400)
 	}
 
-	fmt.Println("续期           : 服务端实测不可用，到期需重新运行 login.py")
+	fmt.Println("续期           : 服务端续期不可用，到期需重新登录学校账号")
 
 	if left != nil && auth.IsExpired(tok, 600) {
-		fmt.Println("状态           : 已过期或临近过期，请重新运行 python login.py。")
+		fmt.Println("状态           : 已过期或临近过期，请在网页中重新登录学校账号。")
 	}
 }

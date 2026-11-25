@@ -116,7 +116,7 @@ func linuxHelpText() string {
   1. sudo ./elec install     # 安装到系统
   2. 浏览器打开 http://服务器IP:5009
   3. 在「查询设置」中添加要监控的宿舍
-  4. 本地运行 python3 login.py --push http://服务器IP:5009
+  4. 在同一页面输入学校账号和密码获取 token
 `
 }
 
@@ -297,8 +297,8 @@ WantedBy=multi-user.target
 	fmt.Printf("  仪表盘:     http://%s:%d\n", dashboardHost, dashboardPort)
 	fmt.Println("")
 	fmt.Println("  登录（约 70 天一次）:")
-	fmt.Printf("  先安全读取密钥: sudo cat %s\n", keyFile)
-	fmt.Printf("  再在本地执行: ADMIN_KEY='<密钥>' python3 login.py --push http://服务器IP:%d --push-only\n", dashboardPort)
+	fmt.Println("  在仪表盘「查询设置 → 学校账号」输入学号和密码")
+	fmt.Println("  也可使用 login.py 手动获取后推送")
 	fmt.Println("")
 }
 
@@ -604,7 +604,7 @@ func warnTokenExpiry(tok *config.Token, last *time.Time) {
 		return
 	}
 	*last = time.Now()
-	slog.Warn("token 即将过期，请重新运行 login.py --push", "days_left", left)
+	slog.Warn("token 即将过期，请在网页中重新登录学校账号", "days_left", left)
 }
 
 func doCollectTargetsReserved(ctx context.Context, targets []config.Target, service *collector.Service) {
@@ -703,7 +703,7 @@ func cmdToken() {
 		os.Exit(1)
 	}
 	if tok == nil || tok.AccessToken == "" {
-		fmt.Println("未找到 token.json，请先运行 python3 login.py")
+		fmt.Println("未找到 token.json，请在网页「查询设置 → 学校账号」登录")
 		return
 	}
 
@@ -721,7 +721,7 @@ func cmdToken() {
 	}
 
 	if auth.IsExpired(tok, 600) {
-		fmt.Println("状态           : 已过期，请重新运行 python3 login.py")
+		fmt.Println("状态           : 已过期，请在网页中重新登录学校账号")
 	}
 }
 

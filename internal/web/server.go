@@ -27,6 +27,7 @@ import (
 	"github.com/mico-v/wxxyshall-monitoring/internal/collector"
 	"github.com/mico-v/wxxyshall-monitoring/internal/config"
 	"github.com/mico-v/wxxyshall-monitoring/internal/db"
+	"github.com/mico-v/wxxyshall-monitoring/internal/schoollogin"
 )
 
 const (
@@ -61,6 +62,8 @@ const (
 	discoveryBurstLimit        = 20
 	adminVerifyPerMinuteLimit  = 20
 	adminVerifyBurstLimit      = 5
+	schoolLoginPerMinuteLimit  = 6
+	schoolLoginBurstLimit      = 3
 	maxConcurrentDiscovery     = 4
 	maxPublicTargets           = 200
 	maxPublicTargetLabelLength = 80
@@ -75,6 +78,7 @@ type Server struct {
 	cfgHub             *config.Hub
 	database           *db.DB
 	collector          *collector.Service
+	schoolLogin        *schoollogin.Client
 	discovery          *discoveryCache
 	hub                *SSEHub
 	jobMgr             *JobManager
@@ -87,6 +91,7 @@ type Server struct {
 	publicAddLimiter   *ipLimiter
 	discoveryLimiter   *ipLimiter
 	adminVerifyLimiter *ipLimiter
+	schoolLoginLimiter *ipLimiter
 	rateLogLimiter     *ipLimiter
 	discoverySem       chan struct{}
 	health             healthTTL // 健康检查结果缓存
@@ -121,6 +126,7 @@ func NewServer(hub *config.Hub, dbPath, adminKey, rootDir string) (*Server, erro
 		cfgHub:             hub,
 		database:           database,
 		collector:          collector.New(hub, database),
+		schoolLogin:        schoollogin.NewClient(),
 		discovery:          newDiscoveryCache(maxDiscoveryCacheEntries),
 		hub:                sseHub,
 		jobMgr:             NewJobManager(),
@@ -133,6 +139,7 @@ func NewServer(hub *config.Hub, dbPath, adminKey, rootDir string) (*Server, erro
 		publicAddLimiter:   newIPLimiter(publicAddPerMinuteLimit, publicAddBurstLimit),
 		discoveryLimiter:   newIPLimiter(discoveryPerMinuteLimit, discoveryBurstLimit),
 		adminVerifyLimiter: newIPLimiter(adminVerifyPerMinuteLimit, adminVerifyBurstLimit),
+		schoolLoginLimiter: newIPLimiter(schoolLoginPerMinuteLimit, schoolLoginBurstLimit),
 		rateLogLimiter:     newIPLimiter(1, 1),
 		discoverySem:       make(chan struct{}, maxConcurrentDiscovery),
 	}
@@ -172,6 +179,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/buildings", s.handleDiscover)
 	mux.HandleFunc("GET /api/rooms", s.handleDiscover)
 	mux.HandleFunc("POST /api/token", s.requireAdmin(s.handlePushToken))
+	mux.HandleFunc("POST /api/school-login", s.requireAdmin(s.limitSchoolLogin(s.handleSchoolLogin)))
 	// 密钥校验始终严格执行。
 	mux.HandleFunc("POST /api/admin/verify", s.limitAdminVerify(s.requireAdminKey(s.handleAdminVerify)))
 
@@ -660,6 +668,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		out["poll_interval_minutes"] = cfg.PollIntervalMin
 		out["rate_limit_per_minute"] = cfg.RateLimitPerMinute
 		out["allow_public_add_target"] = cfg.IsPublicAddAllowed()
+		out["school_token"] = currentSchoolTokenStatus(s.cfgHub.Token())
 		out["webhook"] = map[string]any{
 			"enabled":               cfg.Webhook.Enabled,
 			"url":                   cfg.Webhook.URL,
@@ -948,11 +957,11 @@ func (s *Server) handleCollect(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfgHub.Config()
 
 	if tok == nil || tok.AccessToken == "" {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录，请先运行 python login.py"})
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录，请先在「查询设置 → 学校账号」登录"})
 		return
 	}
 	if auth.IsExpired(tok, 600) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "token 已过期或临近过期（续期不可用），请重新运行 login.py"})
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "token 已过期或临近过期，请重新登录学校账号"})
 		return
 	}
 
@@ -1028,7 +1037,7 @@ func (s *Server) handleCollectAll(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfgHub.Config()
 
 	if tok == nil || tok.AccessToken == "" {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录，请先运行 python login.py"})
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录，请先在「查询设置 → 学校账号」登录"})
 		return
 	}
 	if auth.IsExpired(tok, 600) {
@@ -1187,7 +1196,7 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 			return nil, errDiscoveryTokenMissing
 		}
 		if auth.IsExpired(tok, 600) {
-			return nil, &charge.ChargeAuthError{Msg: "token 已过期或临近过期，请重新运行 login.py"}
+			return nil, &charge.ChargeAuthError{Msg: "token 已过期或临近过期，请重新登录学校账号"}
 		}
 		// 级联发现由 discoveryCache 在进程内缓存并合并相同并发请求，
 		// 不占用定时/手动电费采集共用的 rate_limit_per_minute 节拍。
@@ -1207,7 +1216,7 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		if errors.Is(err, errDiscoveryTokenMissing) {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录，请先运行 python login.py"})
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录，请先在「查询设置 → 学校账号」登录"})
 			return
 		}
 		writeError(w, err)
@@ -1220,6 +1229,95 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Elec-Discovery-Cache", "miss")
 	}
 	writeJSON(w, http.StatusOK, opts)
+}
+
+type schoolTokenStatus struct {
+	Configured  bool     `json:"configured"`
+	Valid       bool     `json:"valid"`
+	Expired     bool     `json:"expired"`
+	Sno         string   `json:"sno,omitempty"`
+	Source      string   `json:"source,omitempty"`
+	LoginTime   int64    `json:"login_time,omitempty"`
+	SecondsLeft *float64 `json:"seconds_left,omitempty"`
+}
+
+func currentSchoolTokenStatus(tok *config.Token) schoolTokenStatus {
+	if tok == nil || strings.TrimSpace(tok.AccessToken) == "" {
+		return schoolTokenStatus{}
+	}
+	expired := auth.IsExpired(tok, 600)
+	return schoolTokenStatus{
+		Configured:  true,
+		Valid:       !expired,
+		Expired:     expired,
+		Sno:         tok.Sno,
+		Source:      tok.Source,
+		LoginTime:   tok.LoginTime,
+		SecondsLeft: auth.SecondsLeft(tok),
+	}
+}
+
+func (s *Server) handleSchoolLogin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeJSON(w, jsonDecodeStatus(err), map[string]string{"error": "JSON 解析失败: " + err.Error()})
+		return
+	}
+	body.Username = strings.TrimSpace(body.Username)
+	if body.Username == "" || body.Password == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "账号和密码不能为空"})
+		return
+	}
+	if utf8.RuneCountInString(body.Username) > 128 || len(body.Password) > 256 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "账号或密码过长"})
+		return
+	}
+
+	cfg := s.cfgHub.Config()
+	tok, err := s.schoolLogin.Login(r.Context(), cfg.BaseURL, body.Username, body.Password)
+	if err != nil {
+		switch {
+		case errors.Is(err, schoollogin.ErrLoginChallenge):
+			slog.Warn("学校账号登录需要额外验证", "err", err)
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		case errors.Is(err, schoollogin.ErrCredentialsRejected), errors.Is(err, schoollogin.ErrLoginRejected):
+			slog.Warn("学校账号登录被拒绝", "err", err)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		default:
+			slog.Warn("学校账号登录失败", "err", err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	if err := s.cfgHub.SetToken(tok); err != nil {
+		slog.Error("保存学校登录 token 失败", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存 token 失败: " + err.Error()})
+		return
+	}
+	if cfg.Username != body.Username {
+		if _, err := s.cfgHub.UpdateConfig(func(cfg *config.Config) error {
+			cfg.Username = body.Username
+			return nil
+		}); err != nil {
+			slog.Warn("保存学校登录账号失败", "err", err)
+		}
+	}
+
+	days := 0
+	if tok.ExpiresIn > 0 {
+		days = tok.ExpiresIn / 86400
+	}
+	slog.Info("学校账号登录成功", "expires_in_days", days)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":              true,
+		"sno":             tok.Sno,
+		"expires_in":      tok.ExpiresIn,
+		"expires_in_days": days,
+		"school_token":    currentSchoolTokenStatus(tok),
+	})
 }
 
 func (s *Server) handlePushToken(w http.ResponseWriter, r *http.Request) {
@@ -1320,6 +1418,17 @@ func (s *Server) limitAdminVerify(next http.HandlerFunc) http.HandlerFunc {
 		if !s.adminVerifyLimiter.Allow(clientIP(r)) {
 			w.Header().Set("Retry-After", "10")
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "登录尝试过于频繁，请稍后再试"})
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) limitSchoolLogin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.schoolLoginLimiter.Allow(clientIP(r)) {
+			w.Header().Set("Retry-After", "20")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "学校登录尝试过于频繁，请稍后再试"})
 			return
 		}
 		next(w, r)

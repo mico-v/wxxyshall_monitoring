@@ -1,8 +1,8 @@
 # 宿舍电费监控
 
-宿舍电费余额采集与展示工具。单个 Go 二进制同时提供定时采集、SQLite 历史记录、网页仪表盘、SSE 实时读数和 PWA；`login.py` 负责在本地浏览器中获取 token。
+宿舍电费余额采集与展示工具。单个 Go 二进制同时提供定时采集、SQLite 历史记录、网页仪表盘、SSE 实时读数和 PWA；在网页输入学校账号密码即可自动完成安全键盘验证并获取 token，无需本地浏览器脚本。
 
-服务端正式支持 Linux amd64/arm64；安装器面向 systemd。`login.py` 可在装有 Python、Playwright 和 Chrome/Edge 的桌面系统运行。
+服务端正式支持 Linux amd64/arm64；安装器面向 systemd。网页登录的密码只在本次请求中使用，不写入配置、token 文件或日志。`login.py` 保留给无法使用网页或需要离线推送 token 的场景。
 
 ## 主要功能
 
@@ -16,6 +16,7 @@
 - 仪表盘按 `config.json` 中的目标顺序显示和采集。网页“查询设置”只提供级联添加宿舍；其他字段、排序和已有宿舍调整统一手工编辑 `config.json`。
 - PWA 可安装，离线时使用最近缓存的公开配置和读数；管理请求和带鉴权请求绝不缓存。
 - 管理配置、采集、发现、token 推送和聚合数据固定需要管理密钥；未登录访客仍可查看单宿舍公开数据。
+- 学校账号、密码可在「查询设置 → 学校账号」中直接登录；服务端按本次安全键盘替换表转换密码并保存 token。
 - 未登录主页固定显示宿舍选择器；`allow_public_add_target=true` 时可直接添加新宿舍并跳转，登录后选择器隐藏，主页显示聚合列表，添加宿舍统一在「查询设置」完成。
 - 浏览器登录一次后长期保留密钥，可随时点「退出登录」；单宿舍页面和单宿舍数据始终公开。
 - 支持配置 webhook 通知；默认在监控宿舍余额首次进入低值区间时发送一次，余额恢复后重新触发。
@@ -24,7 +25,18 @@
 
 ## 快速开始
 
-### 获取 token
+### 登录学校账号
+
+1. 启动服务并打开仪表盘；
+2. 使用管理密钥进入「查询设置」；
+3. 在「学校账号」中输入学号和密码；
+4. 点击「登录获取 Token」，成功后页面会显示剩余有效期。
+
+网页登录不依赖 Python、Playwright 或本机 Chrome/Edge。服务端按学校本次安全键盘的 QWERTY、数字和符号键位替换表转换密码，再提交给学校接口；密码只在本次登录请求中使用，不会落盘。
+
+token 通常有效约 70 天；页面会显示剩余天数，过期后重新登录即可。服务端实测 refresh token 续期不可用。
+
+命令行方式仍然可用，适合无法打开管理页面、需要在离线机器上取 token，或要推送到另一台服务器的场景：
 
 本机需要 Python 3、Playwright 和 Chrome/Edge：
 
@@ -223,6 +235,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 ## 安全边界
 
 - 管理密钥存放于数据目录的 `.admin_key`，服务启动时读取；不会写入 `config.json` 或 systemd unit。
+- 网页学校登录通过管理密钥保护的接口执行。账号密码不会保存或写日志；服务端只在内存中读取本次安全键盘映射和 `uuid`，提交后直接把返回 token 原子写入 `token.json`。
 - 浏览器把密钥长期保存在 `localStorage`，登录一次后无需重复输入，直到点「退出登录」。启动时会校验一次，失效即刻清除。单宿舍仪表盘和读数保持公开；聚合主页、聚合读数和聚合 SSE 始终需要密钥。
 - 管理 API 使用 `Authorization: Bearer <key>`。服务端仍兼容 `?key=<key>`，但查询参数会出现在代理访问日志中；浏览器登录应使用 `/#key=<key>`，自动化调用应使用 Authorization 头。
 - 公开添加限制为每 IP 每分钟 6 次、突发 3 次，宿舍总数最多 200 间；访客只能新增公开宿舍，不能改名、解除隐藏或写入通知/Webhook/独立采集周期。
@@ -251,6 +264,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 |---|---|---|
 | GET | `/api/config?admin=1` | 返回完整管理配置 |
 | POST | `/api/config` | 更新配置；`allow_public_add_target=true` 时允许无密钥单独提交 `{"target": {...}}` |
+| POST | `/api/school-login` | 使用学号和密码完成学校安全键盘登录，保存 token |
 | POST | `/api/collect` | 采集一间已配置宿舍 |
 | POST | `/api/collect-all` | 启动批量采集 |
 | GET | `/api/collect-all/status?job_id=...` | 查询任务快照 |
@@ -262,6 +276,7 @@ elec config       # 显示密钥文件位置，不直接打印密钥
 接口字段约定：
 
 - `POST /api/config` 接受配置章节列出的顶层字段并支持部分更新；网页公开添加宿舍时只提交 `{"target": {...}}`。新宿舍追加到列表末尾；重复宿舍只原位更新 `label`，保留其 `feeitemid`、`appId` 和顺序，不覆盖其他配置。`target` 不能与其他配置字段混用；未知字段或无效范围会返回 `400`。
+- `POST /api/school-login` 请求体为 `{"username":"...","password":"..."}`。接口需要管理密钥，密码不落盘、不回显；成功后只返回学号、有效期和脱敏 token 状态。学校返回验证码或需要选择多个学号时会提示人工处理。
 - `POST /api/collect` 请求体为 `{"campus":"...","building":"...","room":"..."}`；三个字段必须同时提供且目标必须已配置。空对象表示采集配置第一项。
 - 发现接口在 `allow_public_add_target=true` 时公开，否则需要管理密钥。接口使用查询参数 `feeitemid`、`appId`；楼栋接口另需 `campus`，房间接口另需 `campus`、`building`。这些请求不受 `rate_limit_per_minute` 限制；成功结果按 `base_url + feeitemid + appId + 层级参数` 缓存到当前进程，直到服务重启；相同并发请求会合并，错误不缓存，`base_url` 变化会使用新的缓存键。
 - 批量任务状态为 `queued`、`running`、`cancelling`、`cancelled`、`done` 或 `failed`。运行中状态只返回进度计数，终态返回完整 `results`；取消必须传启动接口返回的同一个 `job_id`。
@@ -293,6 +308,7 @@ python3 -m py_compile login.py
 cmd/elec/          CLI、安装器、HTTP 服务和定时循环
 internal/collector 统一定时/单间/批量采集与并发边界
 internal/charge/   学校接口客户端及错误处理
+internal/schoollogin/ 学校账号登录、安全键盘映射与 token 获取
 internal/config/   配置/token 原子读写和热重载
 internal/db/       SQLite 历史记录
 internal/rate/     严格请求间隔器

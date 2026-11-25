@@ -158,11 +158,11 @@ func (s *Service) collectAllReserved(ctx context.Context, targets []config.Targe
 func (s *Service) collectTarget(ctx context.Context, target config.Target, clients map[clientKey]*charge.Client, cfg *config.Config, tok *config.Token) Result {
 	result := Result{Target: target}
 	if tok == nil || tok.AccessToken == "" {
-		result.Err = fmt.Errorf("未找到 token")
+		result.Err = fmt.Errorf("未找到 token，请先在「查询设置 → 学校账号」登录")
 		return result
 	}
 	if auth.IsExpired(tok, 600) {
-		result.Err = &charge.ChargeAuthError{Msg: "token 已过期或临近过期"}
+		result.Err = &charge.ChargeAuthError{Msg: "token 已过期或临近过期，请重新登录学校账号"}
 		return result
 	}
 	if cfg == nil {

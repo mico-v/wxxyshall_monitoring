@@ -27,7 +27,7 @@ func main() {
 		log.Fatalf("Token 加载失败: %v", err)
 	}
 	if tok == nil || tok.AccessToken == "" {
-		log.Fatalf("未找到 token.json，请先运行 python login.py")
+		log.Fatalf("未找到 token.json，请在网页「查询设置 → 学校账号」登录")
 	}
 
 	targets := cfg.GetTargets()
