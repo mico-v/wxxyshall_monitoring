@@ -26,6 +26,12 @@ func TestNewClientDoesNotUseLimiter(t *testing.T) {
 	}
 }
 
+func TestNewClientOnceDoesNotRetry(t *testing.T) {
+	if client := NewClientOnce("https://example.test", "token"); client.maxAttempts != 1 {
+		t.Fatalf("max attempts = %d, want 1", client.maxAttempts)
+	}
+}
+
 func (l *countLimiter) Wait(context.Context) error {
 	l.mu.Lock()
 	l.waits++

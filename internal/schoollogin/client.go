@@ -58,6 +58,15 @@ type Client struct {
 	Now        func() time.Time
 }
 
+// Session 保存一次登录流程所需的 Cookie 和本次安全键盘 uuid。
+// 浏览器只上传映射后的密码，不会把明文密码发送给本站服务端。
+type Session struct {
+	client       *http.Client
+	baseURL      string
+	keyboardUUID string
+	now          func() time.Time
+}
+
 // NewClient 创建登录客户端。
 func NewClient() *Client {
 	return &Client{
@@ -88,13 +97,30 @@ func NewClient() *Client {
 
 // Login 完成安全键盘握手并提交账号密码，返回可写入 token.json 的登录结果。
 func (c *Client) Login(ctx context.Context, baseURL, username, password string) (*config.Token, error) {
-	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	username = strings.TrimSpace(username)
-	if baseURL == "" {
-		return nil, fmt.Errorf("%w: 未配置学校地址", ErrUnavailable)
-	}
 	if username == "" || password == "" {
 		return nil, fmt.Errorf("%w: 账号和密码不能为空", ErrLoginRejected)
+	}
+	session, err := c.StartSession(ctx, baseURL)
+	if err != nil {
+		return nil, err
+	}
+	keyboard, err := session.Keyboard(ctx)
+	if err != nil {
+		return nil, err
+	}
+	mappedPassword, err := encodePasswordForKeyboard(password, *keyboard)
+	if err != nil {
+		return nil, err
+	}
+	return session.LoginMapped(ctx, username, mappedPassword)
+}
+
+// StartSession 建立学校登录所需的 Cookie 会话。
+func (c *Client) StartSession(ctx context.Context, baseURL string) (*Session, error) {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return nil, fmt.Errorf("%w: 未配置学校地址", ErrUnavailable)
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -104,26 +130,45 @@ func (c *Client) Login(ctx context.Context, baseURL, username, password string) 
 	if err != nil {
 		return nil, err
 	}
-
 	c.primeSession(ctx, httpClient, baseURL)
-	keyboard, err := c.fetchKeyboard(ctx, httpClient, baseURL)
+	now := c.Now
+	if now == nil {
+		now = time.Now
+	}
+	return &Session{client: httpClient, baseURL: baseURL, now: now}, nil
+}
+
+// Keyboard 获取本次登录的随机映射表。
+func (s *Session) Keyboard(ctx context.Context) (*KeyboardData, error) {
+	keyboard, err := (&Client{}).fetchKeyboard(ctx, s.client, s.baseURL)
 	if err != nil {
 		return nil, err
 	}
-	keyboardUUID := strings.TrimSpace(keyboard.Data.UUID)
-	if keyboardUUID == "" {
+	s.keyboardUUID = strings.TrimSpace(keyboard.Data.UUID)
+	if s.keyboardUUID == "" {
 		return nil, fmt.Errorf("%w: 安全键盘接口未返回 uuid", ErrUnavailable)
 	}
-	mappedPassword, err := encodePasswordForKeyboard(password, keyboard.Data)
-	if err != nil {
-		return nil, err
+	return &keyboard.Data, nil
+}
+
+// LoginMapped 提交浏览器已经按安全键盘转换后的密码。
+func (s *Session) LoginMapped(ctx context.Context, username, mappedPassword string) (*config.Token, error) {
+	username = strings.TrimSpace(username)
+	if username == "" || mappedPassword == "" {
+		return nil, fmt.Errorf("%w: 账号和映射密码不能为空", ErrLoginRejected)
 	}
-	payload, err := c.requestToken(
+	if s.keyboardUUID == "" {
+		return nil, fmt.Errorf("%w: 登录会话缺少安全键盘 uuid", ErrUnavailable)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	payload, err := (&Client{}).requestToken(
 		ctx,
-		httpClient,
-		baseURL,
+		s.client,
+		s.baseURL,
 		username,
-		mappedPassword+"$1$"+keyboardUUID,
+		mappedPassword+"$1$"+s.keyboardUUID,
 	)
 	if err != nil {
 		return nil, err
@@ -134,8 +179,8 @@ func (c *Client) Login(ctx context.Context, baseURL, username, password string) 
 		return nil, fmt.Errorf("%w: token 有效期字段无效", ErrUnavailable)
 	}
 	now := time.Now
-	if c.Now != nil {
-		now = c.Now
+	if s.now != nil {
+		now = s.now
 	}
 	sno := rawText(payload.Sno)
 	if sno == "" {
@@ -193,10 +238,11 @@ type keyboardResponse struct {
 	Code    int          `json:"code"`
 	Message string       `json:"message"`
 	Msg     string       `json:"msg"`
-	Data    keyboardData `json:"data"`
+	Data    KeyboardData `json:"data"`
 }
 
-type keyboardData struct {
+// KeyboardData 是学校本次随机键位映射。
+type KeyboardData struct {
 	UUID                string `json:"uuid"`
 	NumberKeyboard      string `json:"numberKeyboard"`
 	LowerLetterKeyboard string `json:"lowerLetterKeyboard"`
@@ -243,7 +289,7 @@ func (c *Client) fetchKeyboard(ctx context.Context, client *http.Client, baseURL
 	return &result, nil
 }
 
-func encodePasswordForKeyboard(password string, keyboard keyboardData) (string, error) {
+func encodePasswordForKeyboard(password string, keyboard KeyboardData) (string, error) {
 	numbers := []rune(keyboard.NumberKeyboard)
 	lower := []rune(keyboard.LowerLetterKeyboard)
 	upper := []rune(keyboard.UpperLetterKeyboard)

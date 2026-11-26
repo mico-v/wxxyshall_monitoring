@@ -64,9 +64,17 @@ const (
 	adminVerifyBurstLimit      = 5
 	schoolLoginPerMinuteLimit  = 6
 	schoolLoginBurstLimit      = 3
+	userLoginPerMinuteLimit    = 12
+	userLoginBurstLimit        = 6
+	userReadPerMinuteLimit     = 120
+	userReadBurstLimit         = 30
+	userPaymentPerMinuteLimit  = 8
+	userPaymentBurstLimit      = 3
 	maxConcurrentDiscovery     = 4
 	maxPublicTargets           = 200
 	maxPublicTargetLabelLength = 80
+	maxUserRechargeAmount      = 500
+	minUserRechargeAmount      = 1
 )
 
 var errDiscoveryTokenMissing = errors.New("discovery token missing")
@@ -92,9 +100,16 @@ type Server struct {
 	discoveryLimiter   *ipLimiter
 	adminVerifyLimiter *ipLimiter
 	schoolLoginLimiter *ipLimiter
+	userLoginLimiter   *ipLimiter
+	userReadLimiter    *ipLimiter
+	userPaymentLimiter *ipLimiter
 	rateLogLimiter     *ipLimiter
 	discoverySem       chan struct{}
 	health             healthTTL // 健康检查结果缓存
+	userPortalMu       sync.Mutex
+	userLoginSessions  map[string]*userLoginSession
+	userChargeClients  map[string]*userChargeClient
+	userPaymentOrders  map[string]*userPaymentOrder
 }
 
 type webhookConfigPatch struct {
@@ -140,8 +155,14 @@ func NewServer(hub *config.Hub, dbPath, adminKey, rootDir string) (*Server, erro
 		discoveryLimiter:   newIPLimiter(discoveryPerMinuteLimit, discoveryBurstLimit),
 		adminVerifyLimiter: newIPLimiter(adminVerifyPerMinuteLimit, adminVerifyBurstLimit),
 		schoolLoginLimiter: newIPLimiter(schoolLoginPerMinuteLimit, schoolLoginBurstLimit),
+		userLoginLimiter:   newIPLimiter(userLoginPerMinuteLimit, userLoginBurstLimit),
+		userReadLimiter:    newIPLimiter(userReadPerMinuteLimit, userReadBurstLimit),
+		userPaymentLimiter: newIPLimiter(userPaymentPerMinuteLimit, userPaymentBurstLimit),
 		rateLogLimiter:     newIPLimiter(1, 1),
 		discoverySem:       make(chan struct{}, maxConcurrentDiscovery),
+		userLoginSessions:  make(map[string]*userLoginSession),
+		userChargeClients:  make(map[string]*userChargeClient),
+		userPaymentOrders:  make(map[string]*userPaymentOrder),
 	}
 	s.collector.SetReadingHandler(func(event collector.ReadingEvent) {
 		if event.Target.IsShownInWeb() {
@@ -159,6 +180,8 @@ func (s *Server) Handler() http.Handler {
 	// 前端页面
 	mux.HandleFunc("GET /", s.handleRoot)
 	mux.HandleFunc("GET /room/{campus}/{building}/{room}", s.handleRoom)
+	mux.HandleFunc("GET /user", s.handleUserPortal)
+	mux.HandleFunc("GET /user/{path...}", s.handleUserPortal)
 
 	// API 路由
 	mux.HandleFunc("GET /api/health", s.handleHealth)
@@ -180,6 +203,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/rooms", s.handleDiscover)
 	mux.HandleFunc("POST /api/token", s.requireAdmin(s.handlePushToken))
 	mux.HandleFunc("POST /api/school-login", s.requireAdmin(s.limitSchoolLogin(s.handleSchoolLogin)))
+	mux.HandleFunc("POST /api/user/login/keyboard", s.limitUserLogin(s.handleUserLoginKeyboard))
+	mux.HandleFunc("POST /api/user/login", s.limitUserLogin(s.handleUserLogin))
+	mux.HandleFunc("GET /api/user/campuses", s.limitUserRead(s.handleUserCampuses))
+	mux.HandleFunc("GET /api/user/buildings", s.limitUserRead(s.handleUserBuildings))
+	mux.HandleFunc("GET /api/user/rooms", s.limitUserRead(s.handleUserRooms))
+	mux.HandleFunc("GET /api/user/room", s.limitUserRead(s.handleUserRoom))
+	mux.HandleFunc("GET /api/user/orders", s.limitUserRead(s.handleUserOrders))
+	mux.HandleFunc("POST /api/user/recharge/order", s.limitUserPayment(s.handleUserCreateOrder))
+	mux.HandleFunc("POST /api/user/recharge/prepare", s.limitUserPayment(s.handleUserPreparePayment))
+	mux.HandleFunc("POST /api/user/recharge/pay", s.limitUserPayment(s.handleUserPay))
+	mux.HandleFunc("POST /api/user/recharge/cancel", s.limitUserPayment(s.handleUserCancelOrder))
 	// 密钥校验始终严格执行。
 	mux.HandleFunc("POST /api/admin/verify", s.limitAdminVerify(s.requireAdminKey(s.handleAdminVerify)))
 
@@ -227,6 +261,10 @@ func (s *Server) handleRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 单宿舍页面始终公开加载。
+	s.serveWebApp(w)
+}
+
+func (s *Server) handleUserPortal(w http.ResponseWriter, r *http.Request) {
 	s.serveWebApp(w)
 }
 

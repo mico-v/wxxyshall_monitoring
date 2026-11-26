@@ -3,7 +3,6 @@ import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { RouterProvider } from '@tanstack/react-router';
 import { ToastProvider } from '@/components/toast';
-import { AdminProvider } from '@/lib/admin';
 import { router } from '@/router';
 import './styles.css';
 
@@ -28,9 +27,7 @@ if (container) {
     <StrictMode>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
-          <AdminProvider>
-            <RouterProvider router={router} />
-          </AdminProvider>
+          <RouterProvider router={router} />
         </ToastProvider>
       </QueryClientProvider>
     </StrictMode>,

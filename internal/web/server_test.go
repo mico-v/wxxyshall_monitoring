@@ -1212,6 +1212,8 @@ func TestPWAAppShellAssetsAndNavigationStrategy(t *testing.T) {
 		`const cached = await cache.match(request) || await cache.match('/')`,
 		`event.waitUntil(update.catch(() => undefined))`,
 		`url.pathname.startsWith('/assets/')`,
+		`request.headers.has('X-School-Token')`,
+		`url.pathname.startsWith('/api/user/')`,
 	} {
 		if !strings.Contains(sw, required) {
 			t.Errorf("sw.js omitted %s", required)

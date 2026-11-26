@@ -33,8 +33,14 @@ self.addEventListener('fetch', event => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin || url.pathname === '/api/events') return;
 
-  // 管理请求和所有写请求绝不进入缓存。
-  if (request.method !== 'GET' || request.headers.has('Authorization') || url.searchParams.has('key')) {
+  // 管理请求、用户私有请求和所有写请求绝不进入缓存。
+  if (
+    request.method !== 'GET' ||
+    request.headers.has('Authorization') ||
+    request.headers.has('X-School-Token') ||
+    url.pathname.startsWith('/api/user/') ||
+    url.searchParams.has('key')
+  ) {
     event.respondWith(fetch(request));
     return;
   }

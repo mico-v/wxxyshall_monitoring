@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"strconv"
 	"strings"
@@ -84,6 +85,7 @@ type Client struct {
 	retryBackoff func(attempt int) time.Duration
 	mu           sync.Mutex
 	established  bool
+	maxAttempts  int
 	limiter      interface {
 		Wait(context.Context) error
 	}
@@ -95,15 +97,25 @@ func NewClient(baseURL, accessToken string) *Client {
 	return NewClientWithLimiter(baseURL, accessToken, nil)
 }
 
+// NewClientOnce 创建用户网页代理使用的客户端。只读请求和会话建立都不自动重试，
+// 避免 CDN/WAF 在短时间重复探测时放大 504。
+func NewClientOnce(baseURL, accessToken string) *Client {
+	client := NewClient(baseURL, accessToken)
+	client.maxAttempts = 1
+	return client
+}
+
 // NewClientWithLimiter 创建共享严格节拍器的客户端；每一次真实 HTTP 尝试都会先等待。
 func NewClientWithLimiter(baseURL, accessToken string, limiter interface {
 	Wait(context.Context) error
 }) *Client {
+	jar, _ := cookiejar.New(nil)
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   accessToken,
 		httpClient: &http.Client{
 			Timeout: 20 * time.Second,
+			Jar:     jar,
 			Transport: &http.Transport{
 				MaxIdleConns:          5,
 				MaxIdleConnsPerHost:   2,
@@ -130,7 +142,8 @@ func NewClientWithLimiter(baseURL, accessToken string, limiter interface {
 				return nil
 			},
 		},
-		limiter: limiter,
+		maxAttempts: 3,
+		limiter:     limiter,
 		retryBackoff: func(attempt int) time.Duration {
 			return time.Duration(1500*(attempt+1)) * time.Millisecond
 		},
@@ -160,7 +173,11 @@ func (c *Client) do(ctx context.Context, method, path string, params url.Values,
 	}
 
 	var lastErr error
-	for attempt := 0; attempt <= 2; attempt++ {
+	attempts := c.maxAttempts
+	if attempts < 1 {
+		attempts = 3
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
 		if c.limiter != nil {
 			if err := c.limiter.Wait(ctx); err != nil {
 				return nil, &ChargeError{Msg: "请求已取消", Err: err}
@@ -191,7 +208,7 @@ func (c *Client) do(ctx context.Context, method, path string, params url.Values,
 			if errors.Is(err, errRedirectPolicy) {
 				return nil, &ChargeError{Msg: fmt.Sprintf("请求被安全策略拒绝(%s): %v", path, err), Err: err}
 			}
-			if attempt < 2 {
+			if attempt < attempts-1 {
 				slog.Warn("请求失败，重试", "method", method, "path", path, "attempt", attempt+1, "err", err)
 				if err := waitContext(ctx, c.retryBackoff(attempt)); err != nil {
 					return nil, &ChargeError{Msg: "请求已取消", Err: err}
@@ -209,7 +226,7 @@ func (c *Client) do(ctx context.Context, method, path string, params url.Values,
 			io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 			resp.Body.Close()
 			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
-			if attempt < 2 {
+			if attempt < attempts-1 {
 				slog.Warn("学校接口临时异常，重试", "method", method, "path", path, "status", resp.StatusCode, "attempt", attempt+1)
 				if err := waitContext(ctx, c.retryBackoff(attempt)); err != nil {
 					return nil, &ChargeError{Msg: "请求已取消", Err: err}

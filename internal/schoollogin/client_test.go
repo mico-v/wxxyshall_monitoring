@@ -194,7 +194,7 @@ func TestLoginRejectsCrossOriginRedirect(t *testing.T) {
 }
 
 func TestEncodePasswordForKeyboardUsesVisibleKeyIndexes(t *testing.T) {
-	keyboard := keyboardData{
+	keyboard := KeyboardData{
 		NumberKeyboard:      "9876543210",
 		LowerLetterKeyboard: "zyxwvutsrqponmlkjihgfedcba",
 		UpperLetterKeyboard: "ZYXWVUTSRQPONMLKJIHGFEDCBA",
@@ -216,7 +216,7 @@ func TestEncodePasswordForKeyboardUsesVisibleKeyIndexes(t *testing.T) {
 }
 
 func TestEncodePasswordRejectsIncompleteKeyboard(t *testing.T) {
-	_, err := encodePasswordForKeyboard("abc", keyboardData{UUID: "missing"})
+	_, err := encodePasswordForKeyboard("abc", KeyboardData{UUID: "missing"})
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("error = %v, want ErrUnavailable", err)
 	}

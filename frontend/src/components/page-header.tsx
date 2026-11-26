@@ -1,7 +1,8 @@
 import * as React from 'react';
 import { Link } from '@tanstack/react-router';
-import { IconBolt, IconLogout, IconSettings } from '@tabler/icons-react';
+import { IconBolt, IconCreditCard, IconLogout, IconSettings } from '@tabler/icons-react';
 import { Button } from '@/components/ui/button';
+import { buttonVariants } from '@/components/ui/button';
 import { CollectButton } from '@/components/collect-button';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { useToast } from '@/components/toast';
@@ -48,6 +49,10 @@ export function PageHeader({ onOpenSettings }: { onOpenSettings: () => void }) {
             <IconSettings />
             查询设置
           </Button>
+          <Link to="/user" className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
+            <IconCreditCard />
+            校园卡
+          </Link>
           {hasKey && (
             <Button
               variant="ghost"

@@ -1,17 +1,84 @@
 import * as React from 'react';
-import { Outlet, createRootRoute, useRouterState } from '@tanstack/react-router';
+import { Link, Outlet, createRootRoute, useRouterState } from '@tanstack/react-router';
+import { IconCreditCard } from '@tabler/icons-react';
 import { PageFooter } from '@/components/page-footer';
 import { PageHeader } from '@/components/page-header';
+import { ThemeToggle } from '@/components/theme-toggle';
 import { SettingsDialog } from '@/components/settings-dialog';
-import { useAdmin } from '@/lib/admin';
+import { AdminProvider, useAdmin } from '@/lib/admin';
 import { ApiError } from '@/lib/api';
 import { AppContextProvider, type AppContextValue } from '@/lib/app-context';
 import { usePublicConfig } from '@/lib/hooks';
 import { roomFromPathname } from '@/lib/route';
+import { useUser, UserProvider } from '@/lib/user-context';
 
 export const rootRoute = createRootRoute({ component: RootLayout });
 
 function RootLayout() {
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  if (pathname === '/user' || pathname.startsWith('/user/')) {
+    return (
+      <UserProvider>
+        <UserPortalLayout />
+      </UserProvider>
+    );
+  }
+  return <AdminLayout />;
+}
+
+function UserPortalLayout() {
+  const { session, logout } = useUser();
+  React.useEffect(() => {
+    const previous = document.title;
+    document.title = '校园卡服务 · 宿舍电费监控';
+    return () => {
+      document.title = previous;
+    };
+  }, []);
+  return (
+    <div className="flex min-h-screen flex-col">
+      <header className="sticky top-0 z-40 border-b border-border bg-background/80 backdrop-blur-sm">
+        <div className="mx-auto flex min-h-16 w-full max-w-5xl flex-wrap items-center justify-between gap-2 px-4 py-2">
+          <Link to="/user" className="flex min-w-0 items-center gap-2">
+            <span className="flex size-8 items-center justify-center rounded-md bg-primary/10 text-primary">
+              <IconCreditCard className="size-5" />
+            </span>
+            <span className="truncate text-lg font-semibold">校园卡服务</span>
+          </Link>
+          <div className="flex flex-wrap items-center gap-2">
+            <Link to="/" className="text-sm text-muted-foreground hover:text-foreground">
+              电费监控
+            </Link>
+            {session && (
+              <button
+                type="button"
+                className="rounded-md px-2.5 py-1.5 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+                onClick={logout}
+              >
+                退出登录
+              </button>
+            )}
+            <ThemeToggle />
+          </div>
+        </div>
+      </header>
+      <main className="flex-1">
+        <Outlet />
+      </main>
+      <PageFooter />
+    </div>
+  );
+}
+
+function AdminLayout() {
+  return (
+    <AdminProvider>
+      <AdminPageLayout />
+    </AdminProvider>
+  );
+}
+
+function AdminPageLayout() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const room = React.useMemo(() => roomFromPathname(pathname), [pathname]);
   const configQuery = usePublicConfig(room);
@@ -28,8 +95,6 @@ function RootLayout() {
 
   const aggregate = !!room || verified;
   const picker = !room && !aggregate;
-
-  // 立即采集只对已登录管理员显示。
   const showCollectButton = verified;
 
   const value = React.useMemo<AppContextValue>(
@@ -45,7 +110,6 @@ function RootLayout() {
     [room, config, aggregate, picker, verified, showCollectButton],
   );
 
-  // 主页需要配置来判定公开添加；宿舍页数据公开，可先渲染。
   const waitingForConfig = !room && !config && configQuery.isLoading;
 
   return (
