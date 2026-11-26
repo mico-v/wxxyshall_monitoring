@@ -123,9 +123,10 @@ func (s *Server) handleUserLoginKeyboard(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		SessionID      string `json:"session_id"`
-		Username       string `json:"username"`
-		MappedPassword string `json:"mapped_password"`
+		SessionID             string `json:"session_id"`
+		Username              string `json:"username"`
+		MappedPassword        string `json:"mapped_password"`
+		ConfirmMonitorSession bool   `json:"confirm_monitor_session"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeJSON(w, jsonDecodeStatus(err), map[string]string{"error": "JSON 解析失败: " + err.Error()})
@@ -142,26 +143,53 @@ func (s *Server) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "账号或映射密码过长"})
 		return
 	}
+	monitoredAccount := s.isMonitoredSchoolAccount(body.Username, "")
+	now := time.Now()
 	s.userPortalMu.Lock()
 	login := s.userLoginSessions[body.SessionID]
-	delete(s.userLoginSessions, body.SessionID)
-	s.userPortalMu.Unlock()
-	if login == nil || time.Now().After(login.expireAt) {
+	if login == nil || now.After(login.expireAt) {
+		delete(s.userLoginSessions, body.SessionID)
+		s.userPortalMu.Unlock()
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "登录会话已失效，请重新打开登录页"})
 		return
 	}
+	if monitoredAccount && !body.ConfirmMonitorSession {
+		s.userPortalMu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":                         "该账号同时用于服务器监控。学校对同一账号只保留一个设备会话，继续登录会使监控 token 失效。",
+			"requires_monitor_confirmation": true,
+		})
+		return
+	}
+	delete(s.userLoginSessions, body.SessionID)
+	s.userPortalMu.Unlock()
 	token, err := login.session.LoginMapped(r.Context(), body.Username, body.MappedPassword)
 	if err != nil {
 		s.writeUserLoginError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"access_token": token.AccessToken,
-		"expires_in":   token.ExpiresIn,
-		"login_time":   token.LoginTime,
-		"sno":          token.Sno,
-		"source":       "browser",
+		"access_token":    token.AccessToken,
+		"expires_in":      token.ExpiresIn,
+		"login_time":      token.LoginTime,
+		"sno":             token.Sno,
+		"source":          "browser",
+		"monitor_account": s.isMonitoredSchoolAccount(body.Username, token.Sno),
 	})
+}
+
+func (s *Server) isMonitoredSchoolAccount(username, sno string) bool {
+	username = strings.TrimSpace(username)
+	sno = strings.TrimSpace(sno)
+	cfg := s.cfgHub.Config()
+	tok := s.cfgHub.Token()
+	monitoredSno := ""
+	if tok != nil {
+		monitoredSno = strings.TrimSpace(tok.Sno)
+	}
+	return (username != "" && strings.EqualFold(username, strings.TrimSpace(cfg.Username))) ||
+		(sno != "" && ((monitoredSno != "" && sno == monitoredSno) ||
+			(username != "" && strings.EqualFold(username, monitoredSno))))
 }
 
 func (s *Server) writeUserLoginError(w http.ResponseWriter, err error) {

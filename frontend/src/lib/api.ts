@@ -9,10 +9,12 @@ import type {
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  payload?: Record<string, unknown>;
+  constructor(message: string, status: number, payload?: Record<string, unknown>) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.payload = payload;
   }
 }
 

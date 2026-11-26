@@ -1,19 +1,24 @@
 import * as React from 'react';
 import { createRoute, Link, useNavigate } from '@tanstack/react-router';
 import {
+  IconAlertTriangle,
   IconCards,
   IconClock,
   IconLogin,
   IconReceipt,
+  IconServer,
   IconUserCircle,
 } from '@tabler/icons-react';
+import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { UserOrders } from '@/components/user-orders';
 import { UserRoomPicker } from '@/components/user-room-picker';
-import { PAGE_CONTAINER_CLASSES } from '@/lib/constants';
+import { useToast } from '@/components/toast';
+import { ApiError } from '@/lib/api';
+import { ADMIN_KEY_STORE, PAGE_CONTAINER_CLASSES } from '@/lib/constants';
 import { useUser } from '@/lib/user-context';
 import { rootRoute } from './__root';
 
@@ -44,18 +49,27 @@ function UserLogin() {
   const [username, setUsername] = React.useState('');
   const passwordRef = React.useRef<HTMLInputElement>(null);
   const [submitting, setSubmitting] = React.useState(false);
+  const [confirmMonitor, setConfirmMonitor] = React.useState(false);
   const [error, setError] = React.useState('');
 
-  async function submit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function submit(event?: React.FormEvent<HTMLFormElement>, confirm = false) {
+    event?.preventDefault();
     const password = passwordRef.current?.value ?? '';
     setSubmitting(true);
+    setConfirmMonitor(false);
     setError('');
     try {
-      await login(username, password);
+      await login(username, password, confirm);
       if (passwordRef.current) passwordRef.current.value = '';
     } catch (loginError) {
-      setError((loginError as Error).message);
+      if (
+        loginError instanceof ApiError &&
+        loginError.payload?.requires_monitor_confirmation === true
+      ) {
+        setConfirmMonitor(true);
+      } else {
+        setError((loginError as Error).message);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -100,12 +114,49 @@ function UserLogin() {
                 placeholder="输入密码"
               />
             </div>
+            <p className="rounded-md border border-status-degraded-border bg-status-degraded-bg px-3 py-2 text-xs text-status-degraded-text">
+              学校对同一账号只保留一个设备会话。若该账号也用于服务器监控，浏览器登录前会要求二次确认，登录后可把新 token 同步给监控服务。
+            </p>
+            {confirmMonitor && (
+              <div className="rounded-md border border-status-degraded-border bg-status-degraded-bg p-3">
+                <p className="flex items-center gap-2 text-sm font-medium text-status-degraded-text">
+                  <IconAlertTriangle className="size-4" />
+                  该账号正在用于服务器监控
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  继续登录会使服务器当前学校会话失效。登录完成后可在总览页把新 token
+                  同步回监控服务。
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    disabled={submitting}
+                    onClick={() => void submit(undefined, true)}
+                  >
+                    仍然登录
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setConfirmMonitor(false);
+                      setError('');
+                    }}
+                  >
+                    取消
+                  </Button>
+                </div>
+              </div>
+            )}
             {error && <p className="text-xs text-destructive">{error}</p>}
             <div className="flex flex-wrap items-center justify-between gap-3">
               <p className="max-w-md text-xs text-muted-foreground">
                 密码只在当前页面内存中完成安全键盘映射，不会提交明文，也不会写入本地存储。
               </p>
-              <Button type="submit" disabled={submitting || !username.trim()}>
+              <Button
+                type="submit"
+                disabled={submitting || confirmMonitor || !username.trim()}
+              >
                 <IconLogin />
                 {submitting ? '正在登录...' : '登录'}
               </Button>
@@ -181,6 +232,8 @@ function UserOverview() {
         </CardContent>
       </Card>
 
+      <MonitorSyncPanel />
+
       <Card>
         <CardHeader className="gap-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -211,5 +264,109 @@ function UserOverview() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+function MonitorSyncPanel() {
+  const { session, syncToServer } = useUser();
+  const { toast } = useToast();
+  const [open, setOpen] = React.useState(false);
+  const [syncing, setSyncing] = React.useState(false);
+  const [synced, setSynced] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const [adminKey, setAdminKey] = React.useState(() => {
+    try {
+      return localStorage.getItem(ADMIN_KEY_STORE) || '';
+    } catch {
+      return '';
+    }
+  });
+
+  if (!session) return null;
+
+  async function sync() {
+    setSyncing(true);
+    setError('');
+    try {
+      await syncToServer(adminKey);
+      try {
+        localStorage.setItem(ADMIN_KEY_STORE, adminKey.trim());
+      } catch {
+        /* ignore localStorage failures */
+      }
+      setSynced(true);
+      setOpen(false);
+      toast('当前学校 token 已同步到监控服务');
+    } catch (syncError) {
+      setError((syncError as Error).message);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="flex-row flex-wrap items-start justify-between gap-3">
+        <div>
+          <CardTitle className="flex items-center gap-2">
+            <IconServer className="size-5 text-primary" />
+            服务器监控会话
+          </CardTitle>
+          <CardDescription>
+            如果这个学校账号也是监控服务使用的账号，可把当前浏览器 token 同步给服务器。
+          </CardDescription>
+        </div>
+        <Badge variant={synced ? 'default' : session.monitorAccount ? 'outline' : 'muted'}>
+          {synced ? '已同步' : session.monitorAccount ? '同账号' : '按需同步'}
+        </Badge>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {session.monitorAccount && !synced && (
+          <p className="rounded-md border border-status-degraded-border bg-status-degraded-bg px-3 py-2 text-xs text-status-degraded-text">
+            本次登录已替换学校设备会话。建议立即同步，否则服务器定时采集会继续使用已失效 token。
+          </p>
+        )}
+        {!open && !synced && (
+          <Button variant="outline" onClick={() => setOpen(true)}>
+            <IconServer />
+            同步到监控服务
+          </Button>
+        )}
+        {open && (
+          <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/30 p-3 sm:flex-row sm:items-end">
+            <div className="min-w-0 flex-1 space-y-1.5">
+              <Label htmlFor="monitor-admin-key">管理密钥</Label>
+              <Input
+                id="monitor-admin-key"
+                type="password"
+                autoComplete="off"
+                value={adminKey}
+                onChange={(event) => setAdminKey(event.target.value)}
+                placeholder="输入服务器管理密钥"
+              />
+            </div>
+            <Button disabled={syncing || !adminKey.trim()} onClick={() => void sync()}>
+              {syncing ? '同步中...' : '确认同步'}
+            </Button>
+            <Button
+              variant="ghost"
+              disabled={syncing}
+              onClick={() => {
+                setOpen(false);
+                setError('');
+              }}
+            >
+              取消
+            </Button>
+          </div>
+        )}
+        {error && <p className="text-xs text-destructive">{error}</p>}
+        {synced && (
+          <p className="text-xs text-status-operational-text">
+            服务器已使用当前登录会话，后续请避免再用同一账号在另一台设备登录。
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }

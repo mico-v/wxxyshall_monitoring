@@ -10,13 +10,15 @@ import {
   getLoginKeyboard,
   loginWithMappedPassword,
   mapKeyboardPassword,
+  readUserJSON,
 } from './user-api';
 
 interface UserContextValue {
   ready: boolean;
   session: UserSession | null;
-  login: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string, confirmMonitorSession?: boolean) => Promise<void>;
   logout: () => void;
+  syncToServer: (adminKey: string) => Promise<void>;
   userFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 }
 
@@ -61,18 +63,24 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
   }, [queryClient]);
 
   const login = React.useCallback(
-    async (username: string, password: string) => {
+    async (username: string, password: string, confirmMonitorSession = false) => {
       const account = username.trim();
       if (!account || !password) throw new Error('请输入学校账号和密码');
       const keyboard = await getLoginKeyboard();
       const mapped = mapKeyboardPassword(password, keyboard.keyboard);
-      const result = await loginWithMappedPassword(keyboard.session_id, account, mapped);
+      const result = await loginWithMappedPassword(
+        keyboard.session_id,
+        account,
+        mapped,
+        confirmMonitorSession,
+      );
       const next: UserSession = {
         sno: result.sno || account,
         accessToken: result.access_token,
         expiresIn: result.expires_in,
         loginTime: result.login_time,
         source: result.source || 'browser',
+        monitorAccount: result.monitor_account === true,
       };
       await saveUserSession(next);
       queryClient.clear();
@@ -102,9 +110,35 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
     void clearSession();
   }, [clearSession]);
 
+  const syncToServer = React.useCallback(
+    async (adminKey: string) => {
+      if (!session) throw new Error('请先登录学校账号');
+      const key = adminKey.trim();
+      if (!key) throw new Error('请输入管理密钥');
+      await readUserJSON<{ ok: boolean }>(
+        await fetch('/api/token', {
+          method: 'POST',
+          cache: 'no-store',
+          headers: {
+            Authorization: `Bearer ${key}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            access_token: session.accessToken,
+            expires_in: session.expiresIn,
+            login_time: session.loginTime,
+            sno: session.sno,
+            source: 'user-portal-sync',
+          }),
+        }),
+      );
+    },
+    [session],
+  );
+
   const value = React.useMemo<UserContextValue>(
-    () => ({ ready, session, login, logout, userFetch }),
-    [ready, session, login, logout, userFetch],
+    () => ({ ready, session, login, logout, syncToServer, userFetch }),
+    [ready, session, login, logout, syncToServer, userFetch],
   );
 
   return <UserContext.Provider value={value}>{children}</UserContext.Provider>;

@@ -61,7 +61,7 @@ func TestUserLoginUsesMappedPasswordAndReturnsBrowserSession(t *testing.T) {
 
 	loginRec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/user/login", strings.NewReader(
-		`{"session_id":"`+keyboard.SessionID+`","username":"20260001","mapped_password":"mapped-987"}`,
+		`{"session_id":"`+keyboard.SessionID+`","username":"20260001","mapped_password":"mapped-987","confirm_monitor_session":true}`,
 	))
 	req.Header.Set("Content-Type", "application/json")
 	server.Handler().ServeHTTP(loginRec, req)
@@ -81,8 +81,74 @@ func TestUserLoginUsesMappedPasswordAndReturnsBrowserSession(t *testing.T) {
 	if session["access_token"] != "browser-access" || session["sno"] != "20260001" {
 		t.Fatalf("unexpected browser session: %#v", session)
 	}
+	if session["monitor_account"] != true {
+		t.Fatalf("monitor account flag missing: %#v", session)
+	}
 	if _, ok := session["refresh_token"]; ok {
 		t.Fatal("browser session must not expose an unused refresh token")
+	}
+}
+
+func TestUserLoginRequiresConfirmationForMonitoredAccount(t *testing.T) {
+	server := newTestServer(t)
+	tokenRequests := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/berserker-app/frontInfo":
+			_, _ = w.Write([]byte(`{"code":200,"data":{}}`))
+		case "/berserker-secure/keyboard":
+			_, _ = w.Write(schoolKeyboardJSON("confirm-keyboard"))
+		case "/berserker-auth/oauth/token":
+			tokenRequests++
+			_, _ = w.Write([]byte(`{"access_token":"confirmed-access","expires_in":3600,"sno":"20260001"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+	if _, err := server.cfgHub.UpdateConfig(func(cfg *config.Config) error {
+		cfg.BaseURL = upstream.URL
+		cfg.Username = "20260001"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	keyboardRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(keyboardRec, httptest.NewRequest(
+		http.MethodPost, "/api/user/login/keyboard", nil,
+	))
+	if keyboardRec.Code != http.StatusOK {
+		t.Fatalf("keyboard status = %d body=%s", keyboardRec.Code, keyboardRec.Body.String())
+	}
+	var keyboard struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(keyboardRec.Body.Bytes(), &keyboard); err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"session_id":"` + keyboard.SessionID +
+		`","username":"20260001","mapped_password":"mapped"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/user/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("unconfirmed status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if tokenRequests != 0 || !strings.Contains(rec.Body.String(), `"requires_monitor_confirmation":true`) {
+		t.Fatalf("unexpected confirmation response: %s", rec.Body.String())
+	}
+
+	body = `{"session_id":"` + keyboard.SessionID +
+		`","username":"20260001","mapped_password":"mapped","confirm_monitor_session":true}`
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/user/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || tokenRequests != 1 {
+		t.Fatalf("confirmed status = %d token_requests=%d body=%s", rec.Code, tokenRequests, rec.Body.String())
 	}
 }
 

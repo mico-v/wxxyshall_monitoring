@@ -9,6 +9,7 @@ export interface UserSession {
   expiresIn: number;
   loginTime: number;
   source: string;
+  monitorAccount: boolean;
 }
 
 interface StoredKey {
@@ -24,6 +25,7 @@ interface StoredSession {
   expiresIn: number;
   loginTime: number;
   source: string;
+  monitorAccount?: boolean;
 }
 
 interface CachedValue<T> {
@@ -95,6 +97,7 @@ export async function saveUserSession(session: UserSession): Promise<void> {
       expiresIn: session.expiresIn,
       loginTime: session.loginTime,
       source: session.source,
+      monitorAccount: session.monitorAccount,
     } satisfies StoredSession);
     await transactionDone(transaction);
   } finally {
@@ -124,6 +127,7 @@ export async function loadUserSession(): Promise<UserSession | null> {
       expiresIn: storedSession.expiresIn,
       loginTime: storedSession.loginTime,
       source: storedSession.source,
+      monitorAccount: storedSession.monitorAccount === true,
     };
     if (session.expiresIn > 0 && session.loginTime + session.expiresIn <= Date.now() / 1000) {
       await clearUserSession();

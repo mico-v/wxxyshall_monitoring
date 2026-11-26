@@ -20,6 +20,7 @@ export interface LoginResponse {
   login_time: number;
   sno: string;
   source: string;
+  monitor_account?: boolean;
 }
 
 export interface RoomOption {
@@ -109,6 +110,7 @@ export async function readUserJSON<T>(response: Response): Promise<T> {
         ? body.error
         : `HTTP ${response.status}`,
       response.status,
+      body && typeof body === 'object' ? (body as Record<string, unknown>) : undefined,
     );
   }
   if (!parsed || typeof parsed !== 'object') {
@@ -137,6 +139,7 @@ export function loginWithMappedPassword(
   sessionId: string,
   username: string,
   mappedPassword: string,
+  confirmMonitorSession = false,
 ): Promise<LoginResponse> {
   return publicUserJSON<LoginResponse>('/api/user/login', {
     method: 'POST',
@@ -145,6 +148,7 @@ export function loginWithMappedPassword(
       session_id: sessionId,
       username,
       mapped_password: mappedPassword,
+      confirm_monitor_session: confirmMonitorSession,
     }),
   });
 }
