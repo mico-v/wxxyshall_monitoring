@@ -135,6 +135,22 @@ $env:ELEC_DIR = 'D:\WxxyshallMonitoring'
 .\elec.exe run
 ```
 
+### Android 客户端
+
+`android/` 提供纯本地 Android 客户端，直接调用学校接口完成账号登录、宿舍采集、历史展示、原生通知、订单查询和校园卡充值，不依赖 Go 服务。
+
+要求 JDK 17、Android SDK Platform 35 和 Build Tools 35.0.0：
+
+```bash
+cd android
+export JAVA_HOME=/path/to/jdk-17
+export ANDROID_HOME=/opt/android-sdk
+./gradlew testDebugUnitTest lintDebug assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+Android 后台使用 WorkManager，最短周期为 15 分钟；系统省电策略可能继续延迟执行。学校账号只保留一个设备会话，登录 App 会使其他设备或服务器上的旧会话失效。完整构建说明和 Release 签名变量见 [Android 客户端文档](android/README.md)。
+
 ### 手工交叉编译
 
 ```bash

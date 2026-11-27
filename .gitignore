@@ -8,7 +8,7 @@ __pycache__/
 *.py[cod]
 
 # Docker 数据卷
-data/
+/data/
 
 # 归档/分析缓存
 _archive/
@@ -28,6 +28,15 @@ nohup.out
 node_modules/
 frontend/dist/
 frontend/.vite/
+
+# Android
+android/.gradle/
+android/.idea/
+android/local.properties
+android/**/build/
+android/*.jks
+android/*.keystore
+android/keystore.properties
 
 # 编辑器
 .vscode/

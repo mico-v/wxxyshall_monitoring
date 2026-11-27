@@ -1,2 +1,6 @@
 # Vite 压缩产物可能包含模板字符串中的行尾空格，禁用生成目录的空白检查。
 internal/web/dist/** -whitespace
+
+# Gradle Wrapper: Linux/macOS 使用 LF，Windows 批处理使用 CRLF。
+android/gradlew text eol=lf
+android/gradlew.bat text eol=crlf -whitespace
